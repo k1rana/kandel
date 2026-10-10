@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "name": "Kandel",
+  "surface": "kandel-management-ui",
+  "mode": "operate",
+  "world": "Perk — electric lime on warm parchment",
+  "color": {
+    "lime": "#beff50",
+    "ink": "#14140f",
+    "charcoal": "#30302a",
+    "graphite": "#6e6e64",
+    "stone": "#919183",
+    "smoke": "#b9b9b7",
+    "ash": "#d2d2c8",
+    "parchment": "#f5f5eb",
+    "canvas": "#ffffff",
+    "alert": "#b83c28",
+    "alertWash": "#fbece8",
+    "degraded": "#96581a",
+    "degradedWash": "#f8f0e2"
+  },
+  "colorStrategy": "restrained: achromatic + one lime, plus meaning-bearing state colour",
+  "surfaceStack": ["#ffffff", "#f5f5eb", "#beff50", "#30302a"],
+  "theme": {
+    "toggle": "topbar button, cycles Auto -> Light -> Dark",
+    "persistence": "localStorage key kandel.theme",
+    "appliedAs": "data-theme attribute on <html>, plus window setTheme",
+    "systemFollow": "prefers-color-scheme, updates live",
+    "dark": {
+      "canvas": "#14140f",
+      "parchment": "#1e1e17",
+      "surfaceHover": "#26261e",
+      "well": "#0e0e0a",
+      "ink": "#f5f5eb",
+      "graphite": "#a3a396",
+      "stone": "#7a7a6e",
+      "smoke": "#6b6b60",
+      "ash": "#3f3f35",
+      "lime": "#beff50",
+      "alert": "#ff8f75",
+      "degraded": "#e0a44a"
+    }
+  },
+  "elevation": "none — tonal contrast only, no shadows",
+  "typography": {
+    "family": "Sono",
+    "fallback": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+    "selfHosted": true,
+    "weights": [400, 500],
+    "scale": {
+      "display": { "size": "60px", "weight": 500, "lineHeight": 0.95, "tracking": "-0.03em" },
+      "heading": { "size": "28px", "weight": 500, "lineHeight": 1.14, "tracking": "-0.03em" },
+      "subheading": { "size": "22px", "weight": 500, "lineHeight": 1.18, "tracking": "-0.03em" },
+      "body": { "size": "16px", "weight": 400, "lineHeight": 1.5, "tracking": "normal" },
+      "body-sm": { "size": "14px", "weight": 400, "lineHeight": 1.43, "tracking": "normal" },
+      "caption": { "size": "12px", "weight": 400, "lineHeight": 1.33, "tracking": "normal" },
+      "eyebrow": { "size": "10px", "weight": 500, "lineHeight": 1.4, "tracking": "0.1em" }
+    }
+  },
+  "radius": {
+    "input": "8px",
+    "inner": "18px",
+    "card": "28px",
+    "button": "28px",
+    "pill": "9999px"
+  },
+  "spacing": {
+    "base": "4px",
+    "row": "16-20px",
+    "section": "24px",
+    "page": "24px"
+  },
+  "motion": {
+    "authored": "editor panel rise, 0.2s cubic-bezier(0.22, 1, 0.36, 1)",
+    "micro": "0.12-0.15s background/colour/border",
+    "reducedMotion": "collapsed"
+  },
+  "signature": "a lime state charge per ledger row, tracking health down the page",
+  "fonts": [
+    { "name": "Sono", "license": "SIL OFL 1.1", "source": "Etcetera Type Co.", "path": "crates/kandel-ui/frontend/src/assets/fonts/" }
+  ],
+  "rasters": [],
+  "reference": {
+    "kind": "pinned",
+    "name": "Perk",
+    "url": "https://styles.refero.design/style/75c06591-34d2-493a-bd49-70551b5e4a53"
+  }
+}

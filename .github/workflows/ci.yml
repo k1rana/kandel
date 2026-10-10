@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust tests and lints
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # The workspace lockfile lives at the repository root, not beside the
+          # frontend package.
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Build the frontend
+        # The UI binary embeds `frontend/dist` at compile time, so the frontend
+        # has to be built before any Rust target that includes it.
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir crates/kandel-ui/frontend build
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  frontend:
+    name: Frontend tests and checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      # Install from the workspace root: the frontend is a workspace package,
+      # so a root install creates the node_modules the scripts expect.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm --dir crates/kandel-ui/frontend check
+
+      - name: Test
+        run: pnpm --dir crates/kandel-ui/frontend test
+
+      - name: Build
+        run: pnpm --dir crates/kandel-ui/frontend exec vite build

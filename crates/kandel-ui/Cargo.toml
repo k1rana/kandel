@@ -1,0 +1,37 @@
+[package]
+name = "kandel-ui"
+description = "Kandel management UI: a Tauri desktop app for configuring and monitoring managed processes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "kandel_ui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "kandel-ui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+kandel-config.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { workspace = true, features = ["tray-icon"] }
+tauri-plugin-dialog = { workspace = true }
+tauri-plugin-window-state = "2"
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Shell",
+] }

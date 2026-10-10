@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kandel-config",
+    "crates/kandel-core",
+    "crates/kandel-ui",
+    "crates/kandel-testkit",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Farhan Brillan Widyakirana (k1rana)"]
+repository = "https://github.com/k1rana/kandel"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tempfile = "3"
+notify = "8"
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+windows = "0.62"
+winresource = "0.1"
+tray-icon = "0.26"
+tauri = "2"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+
+kandel-config = { path = "crates/kandel-config" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

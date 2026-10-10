@@ -1,0 +1,7 @@
+packages:
+  - crates/kandel-ui/frontend
+
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild

@@ -1,0 +1,25 @@
+[package]
+name = "kandel-testkit"
+description = "Fixture programs and end-to-end tests for Kandel's graceful stop behavior."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The fixtures exist to be driven by tests, and the code under test is the
+# core's stop path. Depending on the core here (dev-only, so no cycle: the core
+# does not depend back) lets the tests live beside the binaries they need and
+# use `env!("CARGO_BIN_EXE_*")`, which guarantees Cargo built them first.
+[dev-dependencies]
+kandel-core = { path = "../kandel-core" }
+kandel-config.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }

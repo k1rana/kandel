@@ -1,0 +1,265 @@
+/*
+  Kandel — design tokens.
+
+  Visual world: the "Perk" reference — electric lime on warm parchment.
+  The system is achromatic except for one lime voice, uses no shadows, and
+  separates layers by tonal contrast (white → parchment → lime → charcoal).
+
+  Fonts are self-hosted (see assets/fonts/) rather than loaded from a hosted
+  stylesheet, per the project's offline/desktop constraints.
+*/
+
+/* Sono — single family covering every voice. The default instance is the
+   proportional ("Sans") cut; the reference's display tracking is applied
+   per-size in the scale below. */
+@font-face {
+  font-family: "Sono";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url("./assets/fonts/sono-latin-var.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Sono";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url("./assets/fonts/sono-latinext-var.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+:root {
+  /* ── Palette ───────────────────────────────────────────────────────────── */
+  --lime: #beff50;
+  --lime-ink: #14140f; /* text on lime */
+  --ink: #14140f; /* all body/head text */
+  --charcoal: #30302a; /* dark island surfaces */
+  --graphite: #6e6e64; /* secondary text */
+  --stone: #919183; /* faint strokes */
+  --smoke: #b9b9b7; /* placeholder wash */
+  --ash: #d2d2c8; /* rules, dividers, borders */
+  --parchment: #f5f5eb; /* resting card surface */
+  --canvas: #ffffff; /* page ground; raised surfaces */
+  --surface-hover: #ffffff; /* row lift target on the parchment card */
+  --wash: rgba(20, 20, 15, 0.06); /* control hover overlay, any surface */
+  --well: #ffffff; /* inset fields */
+  --scrim: rgba(20, 20, 15, 0.32); /* modal backdrop */
+  --veil: rgba(20, 20, 15, 0.28); /* drag-drop veil */
+  --charge-ring: rgba(20, 20, 15, 0.35); /* state charge outline */
+
+  /* State colours — permitted on top of the world only where they carry
+     meaning. Tuned to clear WCAG AA (4.5:1) against both the parchment ledger
+     and white surfaces, since these words sit on the parchment card. */
+  --alert: #b83c28;
+  --alert-wash: #fbece8;
+  --degraded: #96581a;
+  --degraded-wash: #f8f0e2;
+
+  /* ── Type ──────────────────────────────────────────────────────────────── */
+  --font: "Sono", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --w-regular: 400;
+  --w-medium: 500;
+
+  /* Scale. Tracking tightens at display sizes, and micro-caps get 0.1em. */
+  --text-eyebrow: 10px;
+  --text-caption: 12px;
+  --text-body-sm: 14px;
+  --text-body: 16px;
+  --text-subheading: 22px;
+  --text-heading: 28px;
+  --text-heading-lg: 60px;
+  --tracking-tight: -0.03em;
+  --tracking-micaps: 0.1em;
+
+  /* ── Shape ─────────────────────────────────────────────────────────────── */
+  --r-input: 8px;
+  --r-inner: 18px;
+  --r-card: 28px;
+  --r-pill: 9999px;
+
+  /* ── Space ─────────────────────────────────────────────────────────────── */
+  --s-4: 4px;
+  --s-8: 8px;
+  --s-12: 12px;
+  --s-16: 16px;
+  --s-20: 20px;
+  --s-24: 24px;
+  --s-32: 32px;
+  --s-40: 40px;
+  --s-48: 48px;
+
+  /* ── Motion ────────────────────────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ── Dark mode ──────────────────────────────────────────────────────────────
+
+   The same warm world after dark, not a different one. The ground is the
+   world's own ink (#14140f) rather than a blue-black slate — the craft floor
+   names "blue-black slate on dark grounds" as the rendition prior to hunt, and
+   a cold ground would break the warm-paper identity. Surfaces lift by turning
+   *lighter and warmer*, the exact inverse of the light theme. Lime is
+   unchanged: it is the voice of the brand, and it reads at 14:1 here.
+
+   Every text pair below clears WCAG AA against its own surface:
+     text/ground 16.8 · text/card 15.3 · secondary/card 6.6 · stone/card 3.9
+     lime/card 14.1 · alert/card 7.5 · degraded/card 7.6
+*/
+[data-theme="dark"] {
+  /* Surfaces: charcoal ink ground -> lifted warm card -> lighter hover. */
+  --canvas: #14140f;
+  --parchment: #1e1e17;
+  --surface-hover: #26261e;
+  --wash: rgba(245, 245, 235, 0.08); /* inverse of light: lightens */
+  --well: #0e0e0a; /* inset fields, one step below the ground */
+
+  /* Text */
+  --ink: #f5f5eb;
+  --graphite: #a3a396;
+  --stone: #7a7a6e;
+  --smoke: #6b6b60;
+  --ash: #3f3f35;
+
+  /* Lime stays the brand voice; its ink is the dark ground. */
+  --lime: #beff50;
+  --lime-ink: #14140f;
+
+  /* Charcoal was the light theme's dark island; in dark it is the ground, so
+     the token resolves to a lifted surface instead. */
+  --charcoal: #2a2a22;
+
+  /* State colours, lightened for a dark ground. */
+  --alert: #ff8f75;
+  --alert-wash: #3a231d;
+  --degraded: #e0a44a;
+  --degraded-wash: #33280f;
+
+  /* Overlays cast from the ground outward, not from black. */
+  --scrim: rgba(0, 0, 0, 0.55);
+  --veil: rgba(0, 0, 0, 0.6);
+  --charge-ring: rgba(245, 245, 235, 0.28);
+
+  color-scheme: dark;
+}
+
+/* ── Base ────────────────────────────────────────────────────────────────── */
+/* NOTE: this is a plain CSS file, not a Svelte component. `:global(...)` is a
+   Svelte-only construct, and an unknown selector in a comma list invalidates
+   the ENTIRE rule in CSS — which silently dropped `box-sizing` and made every
+   `width:100%` input overflow its padding and border (horizontal scroll, and
+   fields sliding under the scrollbar). Keep this list plain. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  font-family: var(--font);
+  font-weight: var(--w-regular);
+  font-size: var(--text-body);
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--canvas);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100%;
+}
+
+/* Browser surfaces belong to the design: text selection and the caret are
+   themed from the palette rather than left at platform defaults. */
+::selection {
+  background: var(--lime);
+  color: var(--lime-ink);
+}
+
+/* This is an application, not a document: chrome text (labels, headings,
+   button captions, status words) should not be drag-selectable, which is the
+   native desktop convention and avoids accidental blue highlights while
+   clicking. Text a user may legitimately want to copy — command lines in the
+   ledger, and the contents of inputs — opts back in below. */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea,
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Scrollbars, themed warm.
+
+   These use the WebKit pseudo-elements, which give full control over the thumb
+   shape. Do NOT also set the standard `scrollbar-width` / `scrollbar-color`:
+   when either is non-`auto`, Chromium (and therefore WebView2) ignores
+   `::-webkit-scrollbar` entirely and paints the native thin bar instead, which
+   is what makes a scrollbar look "default". */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ash);
+  /* The transparent border insets the visible thumb into a rounded pill. */
+  border: 4px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--stone);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox fallback only: it has no WebKit pseudo-elements. Kept out of the
+   WebView2 path so the two mechanisms never fight. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--ash) transparent;
+  }
+}
+
+/* Focus rings: lime is the alert voice; focus needs its own signal, so it
+   uses ink at a visible offset. */
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Numbers that change over time (PID, restarts) stay aligned. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

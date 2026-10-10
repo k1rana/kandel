@@ -1,0 +1,27 @@
+{
+  "name": "kandel-ui-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5",
+    "@tsconfig/svelte": "^5",
+    "@types/node": "^22",
+    "svelte": "^5",
+    "svelte-check": "^4",
+    "typescript": "^5.6",
+    "vite": "^6",
+    "vitest": "^3"
+  }
+}

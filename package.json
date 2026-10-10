@@ -1,0 +1,26 @@
+{
+  "name": "kandel",
+  "version": "1.0.0",
+  "description": "Per-process supervision for the Windows interactive session. Built with Rust and Tauri.",
+  "private": true,
+  "scripts": {
+    "prebuild": "shx mkdir -p build",
+    "build": "pnpm run prebuild && pnpm run build:core && pnpm run build:ui",
+    "build:core": "cargo build --release -p kandel-core && shx cp target/release/kandel.exe build/kandel.exe",
+    "build:ui": "tauri build --config crates/kandel-ui/tauri.conf.json && shx cp target/release/kandel-ui.exe build/kandel-ui.exe",
+    "package": "node scripts/package.mjs",
+    "release": "pnpm run build && pnpm run package",
+    "dev": "node scripts/dev.mjs",
+    "test": "cargo test --workspace && pnpm run test:ui",
+    "test:ui": "pnpm --dir crates/kandel-ui/frontend test",
+    "check": "cargo clippy --workspace --all-targets && pnpm run check:ui",
+    "check:ui": "pnpm --dir crates/kandel-ui/frontend check",
+    "icons": "python scripts/make_icons.py",
+    "clean": "shx rm -rf build target"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "shx": "^0.4.0"
+  },
+  "packageManager": "pnpm@10.30.3"
+}

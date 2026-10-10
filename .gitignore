@@ -1,0 +1,41 @@
+node_modules/
+
+# Rust build outputs
+/target/
+**/*.rs.bk
+
+# Build artifacts
+/build/
+*.exe
+
+# Design-review captures (regenerated locally; not part of the source)
+.impeccable/review/
+
+# Local authoring notes from the design/authoring skills. DESIGN.md is the
+# durable design system and *is* committed.
+doc/
+
+# User-specific configuration
+config.toml
+*config.toml
+
+# Frontend
+crates/kandel-ui/frontend/dist/
+crates/kandel-ui/frontend/node_modules/
+
+# Sidecar staging: the core binary is copied here (with a target-triple suffix)
+# by scripts/stage-core.mjs for Tauri's externalBin. Build output.
+crates/kandel-ui/binaries/
+
+# Tauri-generated schemas
+crates/kandel-ui/gen/
+
+# Local scratch (harness configs, build/dev logs, toolchain setup)
+.probe-*
+*.log
+rustup-*.log
+
+# IDE and OS temporary files
+.DS_Store
+.idea/
+.vscode/

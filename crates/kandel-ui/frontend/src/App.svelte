@@ -16,7 +16,9 @@
     extractAppNameFromPath,
     formatCommandLine,
     isSupportedCommandFile,
+    normalizeEnv,
     rowsFromConfig,
+    sanitizeEnvKey,
     stateView,
     summarize,
   } from "./lib/format";
@@ -204,7 +206,7 @@
           return;
         }
         editingOriginalName = appName;
-        editForm = { ...cfg };
+        editForm = { ...cfg, env: cfg.env.map((pair) => ({ ...pair })) };
         showEditor();
       })
       .catch((e) => {
@@ -237,6 +239,20 @@
     // Return focus to whatever opened the editor.
     lastFocused?.focus?.();
     lastFocused = null;
+  }
+
+  // ── Environment rows ──────────────────────────────────────────────────────
+
+  /** Appends an empty pair and focuses its name field on the next tick. */
+  async function addEnvRow() {
+    const index = editForm.env.length;
+    editForm.env = [...editForm.env, { key: "", value: "" }];
+    await tick();
+    panelEl?.querySelector<HTMLInputElement>(`[data-env-key="${index}"]`)?.focus();
+  }
+
+  function removeEnvRow(index: number) {
+    editForm.env = editForm.env.filter((_, i) => i !== index);
   }
 
   /** Keeps Tab focus inside the dialog while it is open. */
@@ -377,6 +393,13 @@
       return;
     }
 
+    const unnamed = editForm.env.some((pair) => !pair.key.trim() && pair.value.trim() !== "");
+    if (unnamed) {
+      errorMessage = "Give every environment variable a name before the \"=\".";
+      return;
+    }
+    const env = normalizeEnv(editForm.env);
+
     isSaving = true;
     errorMessage = "";
     try {
@@ -387,7 +410,7 @@
           return;
         }
       }
-      await updateAppConfig(editingOriginalName, { ...editForm, name, command });
+      await updateAppConfig(editingOriginalName, { ...editForm, name, command, env });
       await refreshFromConfig();
       closeEditor();
     } catch (e) {
@@ -604,6 +627,67 @@
             <span class="lbl">Working directory <em>optional</em></span>
             <input class="inp" bind:value={editForm.cwd} placeholder="Defaults to the command's folder" />
           </label>
+
+          <div class="divider span2">
+            <span>Environment <em>optional</em></span>
+          </div>
+
+          <div class="field span2">
+            <span class="lbl">
+              Variables <em>added for this app; values may use {"${VAR}"}</em>
+            </span>
+            {#if editForm.env.length === 0}
+              <p class="env-empty">No variables. The app inherits your environment.</p>
+            {:else}
+              <ul class="env-list">
+                {#each editForm.env as row, i (i)}
+                  <li class="env-row">
+                    <input
+                      class="inp env-key"
+                      data-env-key={i}
+                      value={row.key}
+                      oninput={(e) => {
+                        const el = e.currentTarget as HTMLInputElement;
+                        const clean = sanitizeEnvKey(el.value);
+                        // Fully controlled: the model holds the sanitized name
+                        // and the field is written back every keystroke, so the
+                        // space-to-underscore replacement is visible live and
+                        // cannot be undone by a stray binding write.
+                        row.key = clean;
+                        if (el.value !== clean) el.value = clean;
+                      }}
+                      placeholder="NAME"
+                      aria-label="Environment variable {i + 1} name"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <span class="eq" aria-hidden="true">=</span>
+                    <input
+                      class="inp env-val"
+                      bind:value={row.value}
+                      placeholder="value"
+                      aria-label="Environment variable {i + 1} value"
+                      autocapitalize="off"
+                      spellcheck="false"
+                    />
+                    <button
+                      class="env-del"
+                      type="button"
+                      aria-label="Remove variable {row.key.trim() || i + 1}"
+                      onclick={() => removeEnvRow(i)}
+                    >
+                      <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                        <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.4" />
+                      </svg>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <button class="ghost sm env-add" type="button" onclick={addEnvRow}>Add variable</button>
+          </div>
 
           <div class="checks span2">
             <label class="check">
@@ -1265,5 +1349,55 @@
     border-radius: var(--r-input);
     color: var(--alert);
     font-size: var(--text-body-sm);
+  }
+
+  /* ── Environment rows ───────────────────────────────────────────────────── */
+  .env-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-8);
+  }
+  .env-row {
+    display: grid;
+    /* Key, `=`, value, delete. The inputs can shrink below their content. */
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.4fr) auto;
+    align-items: center;
+    gap: var(--s-8);
+  }
+  .env-row .eq {
+    color: var(--graphite);
+    font-size: var(--text-body-sm);
+  }
+  /* The name is the variable's identity; the value is its payload. */
+  .env-key {
+    font-weight: var(--w-medium);
+  }
+  .env-del {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--ash);
+    border-radius: var(--r-pill);
+    background: transparent;
+    color: var(--graphite);
+    cursor: pointer;
+    transition: background 0.12s var(--ease-out), color 0.12s var(--ease-out);
+  }
+  .env-del:hover {
+    background: var(--wash);
+    color: var(--ink);
+  }
+  .env-empty {
+    margin: 0;
+    color: var(--graphite);
+    font-size: var(--text-caption);
+  }
+  .env-add {
+    align-self: flex-start;
   }
 </style>

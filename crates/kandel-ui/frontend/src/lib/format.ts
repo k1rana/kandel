@@ -1,7 +1,34 @@
 /** Pure helpers used by the UI. Kept free of DOM/Tauri dependencies so they are
  * straightforward to unit test. */
 
-import type { AppStateInfo } from "./types";
+import type { AppStateInfo, EnvVar } from "./types";
+
+/** Normalizes edited environment pairs into the persisted form.
+ *
+ * Names are trimmed; a pair with a blank name is dropped. Values are kept
+ * verbatim, so a value may contain `=` and surrounding spaces are preserved.
+ *
+ * Names with interior whitespace are *kept* here (`"MY VAR"` does not trim to
+ * an empty key) so validation can report them instead of silently dropping the
+ * row; `App.svelte`'s save rejects them.
+ */
+export function normalizeEnv(pairs: EnvVar[]): EnvVar[] {
+  return pairs
+    .map((pair) => ({ key: pair.key.trim(), value: pair.value }))
+    .filter((pair) => pair.key !== "");
+}
+
+/** Corrects an environment variable name as it is typed.
+ *
+ * A space (or any whitespace) cannot appear in a variable name — a shell cannot
+ * reference `%MY VAR%` — so it is folded to `_` in place instead of being
+ * rejected later. The replacement is one-for-one, which keeps the caret steady
+ * while typing. Other invalid characters (`=`, NUL) are left for validation,
+ * because silently rewriting them would hide a real mistake.
+ */
+export function sanitizeEnvKey(name: string): string {
+  return name.replace(/\s/g, "_");
+}
 
 /** Extracts a suggested app name from a command path (filename without extension). */
 export function extractAppNameFromPath(filePath: string): string {

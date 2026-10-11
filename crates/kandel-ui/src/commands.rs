@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use kandel_config::{format_args, parse_args, App, ConfigError, DEFAULT_CONFIG};
+use kandel_config::{format_args, parse_args, App, ConfigError, EnvVar, DEFAULT_CONFIG};
 
 /// Shared UI state: the resolved config path.
 pub struct UiState {
@@ -47,6 +47,8 @@ pub struct AppConfig {
     pub command: String,
     /// Shell-formatted arguments string.
     pub args: String,
+    /// Environment variables as ordered key/value pairs.
+    pub env: Vec<EnvVar>,
     /// Optional stop command.
     pub stop_command: String,
     /// Shell-formatted stop arguments string.
@@ -73,6 +75,7 @@ impl AppConfig {
             enabled: app.enabled,
             command: app.command.clone(),
             args: format_args(&app.args),
+            env: app.env.clone(),
             stop_command: app.stop_command.clone(),
             stop_args: format_args(&app.stop_args),
             cwd: app.cwd.clone(),
@@ -95,6 +98,7 @@ impl AppConfig {
             enabled: self.enabled,
             command: self.command.clone(),
             args,
+            env: self.env.clone(),
             stop_command: self.stop_command.clone(),
             stop_args,
             cwd: self.cwd.clone(),
@@ -309,6 +313,16 @@ mod tests {
             enabled: true,
             command: r"C:\bin\app.exe".into(),
             args: r#"-c "hello world" --debug"#.into(),
+            env: vec![
+                EnvVar {
+                    key: "NODE_ENV".into(),
+                    value: "development".into(),
+                },
+                EnvVar {
+                    key: "PORT".into(),
+                    value: "3000".into(),
+                },
+            ],
             stop_command: "taskkill".into(),
             stop_args: "/PID ${PID} /T".into(),
             cwd: r"C:\work".into(),
@@ -331,6 +345,7 @@ mod tests {
 
         // Fields without shell-significant characters round-trip verbatim.
         assert_eq!(back.args, dto.args);
+        assert_eq!(back.env, dto.env);
         assert_eq!(back.name, dto.name);
         assert_eq!(back.command, dto.command);
         assert_eq!(back.cwd, dto.cwd);
@@ -345,6 +360,7 @@ mod tests {
             enabled: true,
             command: "app.exe".into(),
             args: r#""unterminated"#.into(),
+            env: Vec::new(),
             stop_command: String::new(),
             stop_args: String::new(),
             cwd: String::new(),

@@ -20,8 +20,8 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTF_USESHOWWINDOW,
-    STARTUPINFOW,
+    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
+    STARTF_USESHOWWINDOW, STARTUPINFOW,
 };
 
 use kandel_config::App;
@@ -146,6 +146,9 @@ pub struct LaunchSpec {
     pub cwd: Option<String>,
     /// Whether to launch with a hidden window.
     pub hide_window: bool,
+    /// Environment variables to set on the child, as resolved `(name, value)`
+    /// pairs. Empty means the child inherits the core's environment unchanged.
+    pub env: Vec<(String, String)>,
 }
 
 impl LaunchSpec {
@@ -163,11 +166,13 @@ impl LaunchSpec {
         } else {
             Some(cwd.to_string_lossy().into_owned())
         };
+        let env = app.resolved_env().map_err(|e| anyhow!("{e}"))?;
         Ok(LaunchSpec {
             program,
             args,
             cwd,
             hide_window: app.hide_window,
+            env,
         })
     }
 }
@@ -184,6 +189,25 @@ pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
 
     let cwd_wide = spec.cwd.as_deref().filter(|s| !s.is_empty()).map(wide_null);
 
+    // A configured env block is applied *on top of* the inherited environment,
+    // so the child keeps its normal `PATH`, `SystemRoot`, and so on while gaining
+    // the variables the user set. `CreateProcessW` wants a double-NUL-terminated
+    // `NAME=VALUE\0` block plus `CREATE_UNICODE_ENVIRONMENT`.
+    let env_block = if spec.env.is_empty() {
+        None
+    } else {
+        let entries = merge_env(parent_env_entries(), &spec.env);
+        Some(build_env_block(&entries))
+    };
+    let mut creation_flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
+    let env_ptr = match env_block.as_deref().filter(|b| !b.is_empty()) {
+        Some(block) => {
+            creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+            block.as_ptr()
+        }
+        None => std::ptr::null(),
+    };
+
     let mut si = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
@@ -194,8 +218,6 @@ pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
         si.wShowWindow = 0;
     }
 
-    let creation_flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
-
     let mut pi = PROCESS_INFORMATION::default();
     unsafe {
         CreateProcessW(
@@ -205,7 +227,7 @@ pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
             None,
             false,
             creation_flags,
-            None,
+            Some(env_ptr as *const std::ffi::c_void),
             cwd_wide
                 .as_ref()
                 .map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr())),
@@ -255,6 +277,66 @@ fn wide_null(s: &str) -> Vec<u16> {
         .collect()
 }
 
+/// The parent process's environment as ordered `(name, value)` pairs.
+fn parent_env_entries() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Overlays `overrides` onto `base`, returning the merged set.
+///
+/// Windows environment variable names are case-insensitive, so an override
+/// replaces any existing entry that matches ignoring case, keeping the base
+/// position rather than appending a duplicate. New names append in order.
+pub fn merge_env(
+    base: Vec<(String, String)>,
+    overrides: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut merged = base;
+    for (name, value) in overrides {
+        if name.is_empty() {
+            continue;
+        }
+        match merged
+            .iter()
+            .position(|(k, _)| k.eq_ignore_ascii_case(name))
+        {
+            Some(pos) => merged[pos] = (name.clone(), value.clone()),
+            None => merged.push((name.clone(), value.clone())),
+        }
+    }
+    merged
+}
+
+/// Encodes `entries` as a `CREATE_UNICODE_ENVIRONMENT` block.
+///
+/// The result is a sequence of `NAME=VALUE` entries, each UTF-16 and
+/// NUL-terminated, closed by a second NUL. A name or value containing an
+/// interior NUL is skipped, since it cannot be represented.
+fn build_env_block(entries: &[(String, String)]) -> Vec<u16> {
+    let mut block: Vec<u16> = Vec::new();
+    for (name, value) in entries {
+        if name.is_empty() {
+            continue;
+        }
+        let entry = format!("{name}={value}");
+        let encoded: Vec<u16> = entry.encode_utf16().collect();
+        if encoded.contains(&0) {
+            continue;
+        }
+        block.extend_from_slice(&encoded);
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 /// Waits for either the process to exit or `stop` to be signalled.
 ///
 /// Implemented with a polling loop so it can observe a shared atomic stop flag
@@ -280,6 +362,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_env_block_double_terminates() {
+        let block = build_env_block(&[("A".into(), "1".into())]);
+        // `A=1` then a NUL terminator, then the closing NUL.
+        assert_eq!(block, vec![65, 61, 49, 0, 0]);
+    }
+
+    #[test]
+    fn merge_env_overrides_case_insensitively_and_appends() {
+        let base = vec![
+            ("Path".to_string(), "C:\\Windows".to_string()),
+            ("HOME".to_string(), "C:\\Users\\me".to_string()),
+        ];
+        let overrides = vec![
+            ("PATH".to_string(), "C:\\tools".to_string()),
+            ("PORT".to_string(), "3000".to_string()),
+        ];
+        let merged = merge_env(base, &overrides);
+        assert_eq!(merged[0], ("PATH".to_string(), "C:\\tools".to_string()));
+        assert_eq!(merged[1], ("HOME".to_string(), "C:\\Users\\me".to_string()));
+        assert_eq!(merged[2], ("PORT".to_string(), "3000".to_string()));
+    }
+
+    #[test]
+    fn build_env_block_skips_interior_nul() {
+        let block = build_env_block(&[("BAD".into(), "a\0b".into()), ("OK".into(), "1".into())]);
+        let text = String::from_utf16_lossy(&block);
+        assert_eq!(text, "OK=1\0\0");
+    }
+
+    #[test]
+    fn spawn_injects_custom_environment() {
+        // `cmd /c exit %VAR%` returns the value of the injected variable. The
+        // child only sees "7" if the override reached it.
+        let spec = LaunchSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "exit %KANDEL_INJECTED%".into()],
+            cwd: None,
+            hide_window: true,
+            env: vec![("KANDEL_INJECTED".into(), "7".into())],
+        };
+        let child = spawn_with_job_object(&spec).expect("spawn");
+        assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
+        assert_eq!(child.exit_code().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn spawn_inherits_parent_environment_when_overriding() {
+        // A configured variable must not wipe the inherited environment: the
+        // child still sees `SystemRoot`, which only the parent provides. A
+        // replace-not-merge implementation would drop it and exit 5.
+        assert!(std::env::var_os("SystemRoot").is_some());
+        let spec = LaunchSpec {
+            program: "cmd.exe".into(),
+            args: vec![
+                "/c".into(),
+                "if defined SystemRoot (exit 0) else (exit 5)".into(),
+            ],
+            cwd: None,
+            hide_window: true,
+            env: vec![("KANDEL_INJECTED".into(), "0".into())],
+        };
+        let child = spawn_with_job_object(&spec).expect("spawn");
+        assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
+        assert_eq!(child.exit_code().unwrap(), Some(0));
+    }
+
+    #[test]
     fn launch_spec_resolves_relative_paths() {
         // Use a command that exists on the test host.
         let exe = std::env::current_exe().unwrap();
@@ -293,6 +442,35 @@ mod tests {
     }
 
     #[test]
+    fn launch_spec_resolves_env_pairs() {
+        let app = App {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            env: vec![
+                kandel_config::EnvVar {
+                    key: "FOO".into(),
+                    value: "bar".into(),
+                },
+                kandel_config::EnvVar {
+                    key: "BAZ".into(),
+                    value: "qux".into(),
+                },
+            ],
+            ..App::default()
+        };
+        let spec = LaunchSpec::from_app(&app).unwrap();
+        assert_eq!(
+            spec.env,
+            [
+                ("FOO".to_string(), "bar".to_string()),
+                ("BAZ".to_string(), "qux".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn spawn_and_wait_for_fast_process() {
         // `cmd.exe /c exit 0` should exit immediately.
         let spec = LaunchSpec {
@@ -300,6 +478,7 @@ mod tests {
             args: vec!["/c".into(), "exit 0".into()],
             cwd: None,
             hide_window: true,
+            env: Vec::new(),
         };
         let child = spawn_with_job_object(&spec).expect("spawn");
         assert!(child.pid > 0);
@@ -316,6 +495,7 @@ mod tests {
             args: vec!["/c".into(), "ping -n 60 127.0.0.1 > nul".into()],
             cwd: None,
             hide_window: true,
+            env: Vec::new(),
         };
         let child = spawn_with_job_object(&spec).expect("spawn");
         let pid = child.pid;
@@ -341,6 +521,7 @@ mod tests {
             args: vec!["/c".into(), "exit 7".into()],
             cwd: None,
             hide_window: true,
+            env: Vec::new(),
         };
         let child = spawn_with_job_object(&spec).expect("spawn");
         assert_eq!(child.exit_code().unwrap(), None, "still running");
@@ -355,6 +536,7 @@ mod tests {
             args: vec!["/c".into(), "ping -n 60 127.0.0.1 > nul".into()],
             cwd: None,
             hide_window: true,
+            env: Vec::new(),
         };
         let child = spawn_with_job_object(&spec).expect("spawn");
         child.terminate().expect("terminate");

@@ -7,7 +7,9 @@ import {
   extractAppNameFromPath,
   formatCommandLine,
   isSupportedCommandFile,
+  normalizeEnv,
   rowsFromConfig,
+  sanitizeEnvKey,
   stateView,
   summarize,
 } from "./format";
@@ -25,6 +27,66 @@ function status(overrides: Partial<AppStateInfo> = {}): AppStateInfo {
     ...overrides,
   };
 }
+
+describe("normalizeEnv", () => {
+  it("trims names and keeps values verbatim", () => {
+    expect(
+      normalizeEnv([
+        { key: "  PORT  ", value: " 3000 " },
+        { key: "TOKEN", value: "a=b" },
+      ]),
+    ).toEqual([
+      { key: "PORT", value: " 3000 " },
+      { key: "TOKEN", value: "a=b" },
+    ]);
+  });
+
+  it("drops blank rows and preserves order", () => {
+    expect(
+      normalizeEnv([
+        { key: "", value: "" },
+        { key: "B", value: "2" },
+        { key: "   ", value: "ignored" },
+        { key: "A", value: "1" },
+      ]),
+    ).toEqual([
+      { key: "B", value: "2" },
+      { key: "A", value: "1" },
+    ]);
+  });
+
+  it("returns an empty list for no pairs", () => {
+    expect(normalizeEnv([])).toEqual([]);
+  });
+
+  it("keeps an interior-space name so validation can reject it", () => {
+    // Trimming must not turn "MY VAR" into an empty key (which would silently
+    // drop the row); the input's sanitizer already folds spaces to `_`, so this
+    // only guards the paste/hand-edit path.
+    expect(normalizeEnv([{ key: " MY VAR ", value: "1" }])).toEqual([
+      { key: "MY VAR", value: "1" },
+    ]);
+  });
+});
+
+describe("sanitizeEnvKey", () => {
+  it("folds whitespace to underscores", () => {
+    expect(sanitizeEnvKey("MY VAR")).toBe("MY_VAR");
+    expect(sanitizeEnvKey("A B C")).toBe("A_B_C");
+    expect(sanitizeEnvKey("lead ing")).toBe("lead_ing");
+  });
+
+  it("replaces one-for-one so the caret stays steady", () => {
+    expect(sanitizeEnvKey("A B")).toHaveLength(3);
+  });
+
+  it("leaves valid names and other symbols untouched", () => {
+    expect(sanitizeEnvKey("NODE_ENV")).toBe("NODE_ENV");
+    expect(sanitizeEnvKey("my.app-flag")).toBe("my.app-flag");
+    // `=` is left for validation, not silently rewritten.
+    expect(sanitizeEnvKey("A=B")).toBe("A=B");
+  });
+});
 
 describe("extractAppNameFromPath", () => {
   it("strips directories and extension", () => {

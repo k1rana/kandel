@@ -92,6 +92,7 @@ Each top-level TOML table (`[name]`) defines one monitored app. `name` is the id
 | --------------------- | ------------ | ------------------------------- | --------------------------------------------------------------------------------- |
 | `command`             | String       | —                               | **Required.** Path to the command. Relative paths and bare names resolve via `PATH`. |
 | `args`                | String array | `[]`                            | Arguments passed to `command`.                                                    |
+| `env`                 | Table array  | `[]`                            | Environment variables added for this app. Each entry is a table with a `key` and a `value`. See [Environment variables](#environment-variables). |
 | `cwd`                 | String       | Directory of resolved `command` | Working directory when launching the process.                                     |
 | `enabled`             | Boolean      | `true`                          | Whether Kandel launches and monitors this app.                                    |
 | `hide_window`         | Boolean      | `false`                         | If `true`, launches the process with a hidden window.                             |
@@ -150,7 +151,7 @@ The visual system is documented in [`DESIGN.md`](./DESIGN.md).
 
 ### Placeholders and environment variables
 
-`command`, `args`, `cwd`, `stop_command`, and `stop_args` all support placeholder expansion:
+`command`, `args`, `cwd`, `stop_command`, `stop_args`, and every `env` value support placeholder expansion:
 
 - `${NAME}` expands to the value of the environment variable `NAME`. An undefined `NAME` is an error.
 - `${PID}` expands to the monitored process PID. **Only valid inside `stop_args`.**
@@ -167,6 +168,36 @@ stop_args = ['/PID', '${PID}', '/T']
 ```
 
 Expansion is single-pass, so the content of an environment variable is always treated literally.
+
+### Environment variables
+
+The `env` field adds environment variables to a monitored process. Each entry is a
+key/value table, so the name may contain characters (such as `.` or `-`) that a
+bare TOML key cannot:
+
+```toml
+["My Dev Server"]
+command = 'npm'
+args = ['run', 'dev']
+env = [
+  { key = "NODE_ENV", value = "development" },
+  { key = "PORT", value = "3000" },
+  { key = "PATH", value = '${PATH};C:\tools\bin' },
+]
+```
+
+- The variables are **added to** the process's inherited environment; they do not
+  replace it, so `PATH`, `SystemRoot`, and the rest remain available.
+- A name must not contain whitespace, `=` or NUL, so it stays usable from a shell
+  (`%NAME%` / `$NAME`). Names like `my.app-flag` are fine. In the editor, a space
+  typed into a name is folded to `_` as you type; a stray `=` is rejected on save.
+- A name that already exists in the environment is overridden (case-insensitively,
+  since Windows variable names are not case-sensitive).
+- An `env` value may reference the process environment or a variable declared
+  earlier in the same list, so one variable can build on another.
+- Changing `env` restarts the process, the same as changing `command` or `args`.
+
+The management UI edits the same variables as key/value rows in the editor.
 
 ### Stop behavior
 

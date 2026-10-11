@@ -51,12 +51,13 @@ pub fn decide(current: &App, desired: &App) -> Action {
 /// Returns true when any process-identity field changed, which requires a full
 /// process restart.
 ///
-/// Process-identity fields: `command`, `args`, `cwd`, `hide_window`.
+/// Process-identity fields: `command`, `args`, `env`, `cwd`, `hide_window`.
 pub fn has_identity_changed(current: &App, desired: &App) -> bool {
     current.command != desired.command
         || current.cwd != desired.cwd
         || current.hide_window != desired.hide_window
         || current.args != desired.args
+        || current.env != desired.env
 }
 
 /// Returns true when only monitoring parameters changed, which can be
@@ -116,6 +117,17 @@ mod tests {
         let mut hidden = current.clone();
         hidden.hide_window = true;
         assert!(has_identity_changed(&current, &hidden));
+    }
+
+    #[test]
+    fn identity_change_on_env() {
+        let current = app();
+        let mut desired = current.clone();
+        desired.env = vec![kandel_config::EnvVar {
+            key: "PORT".into(),
+            value: "3000".into(),
+        }];
+        assert!(has_identity_changed(&current, &desired));
     }
 
     #[test]

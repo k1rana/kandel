@@ -8,12 +8,20 @@ export interface AboutInfo {
   repository: string;
 }
 
+/** A single environment variable set on a managed process. */
+export interface EnvVar {
+  key: string;
+  value: string;
+}
+
 /** A configuration entry as edited in the UI. Mirrors the Rust `AppConfig` DTO. */
 export interface AppConfig {
   name: string;
   enabled: boolean;
   command: string;
   args: string;
+  /** Ordered environment variables for this app. */
+  env: EnvVar[];
   stopCommand: string;
   stopArgs: string;
   cwd: string;
@@ -42,6 +50,7 @@ export function makeEmptyForm(): AppConfig {
     enabled: true,
     command: "",
     args: "",
+    env: [],
     stopCommand: "",
     stopArgs: "",
     cwd: "",

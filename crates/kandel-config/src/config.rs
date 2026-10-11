@@ -59,6 +59,18 @@ pub enum ConfigError {
     },
 }
 
+/// One environment variable set for a managed process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVar {
+    /// Variable name. Must not contain whitespace, `=`, or NUL, so it stays
+    /// usable from a shell (`%NAME%` / `$NAME`).
+    pub key: String,
+    /// Variable value. May contain `${NAME}` placeholders; see
+    /// [`App::resolved_env`].
+    #[serde(default)]
+    pub value: String,
+}
+
 /// Configuration for a single managed application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct App {
@@ -74,6 +86,13 @@ pub struct App {
     /// Arguments passed to `command`.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables set for the launched process.
+    ///
+    /// An ordered list of key/value pairs. Values may reference the process
+    /// environment or a variable declared earlier in the list with `${NAME}`;
+    /// see [`App::resolved_env`].
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
     /// Optional shutdown executable.
     #[serde(default)]
     pub stop_command: String,
@@ -117,6 +136,7 @@ impl Default for App {
             enabled: DEFAULT_ENABLED,
             command: String::new(),
             args: Vec::new(),
+            env: Vec::new(),
             stop_command: String::new(),
             stop_args: Vec::new(),
             cwd: String::new(),
@@ -146,6 +166,28 @@ impl App {
         for (i, arg) in self.args.iter().enumerate() {
             expand::expand_env(arg)
                 .map_err(|e| ConfigError::Other(format!("invalid args[{i}]: {e}")))?;
+        }
+
+        for (i, var) in self.env.iter().enumerate() {
+            if var.key.trim().is_empty() {
+                return Err(ConfigError::Other(format!("env[{i}] key is empty")));
+            }
+            if var
+                .key
+                .chars()
+                .any(|c| c.is_whitespace() || c == '=' || c == '\0')
+            {
+                return Err(ConfigError::Other(format!(
+                    "env[{i}] key must not contain whitespace, '=', or NUL"
+                )));
+            }
+            if var.value.contains('\0') {
+                return Err(ConfigError::Other(format!(
+                    "env[{i}] value must not contain NUL"
+                )));
+            }
+            expand::validate_template(&var.value, false)
+                .map_err(|e| ConfigError::Other(format!("invalid env[{i}]: {e}")))?;
         }
 
         for (i, arg) in self.stop_args.iter().enumerate() {
@@ -188,6 +230,27 @@ impl App {
                     .map_err(|e| ConfigError::Other(format!("invalid args[{i}]: {e}")))
             })
             .collect()
+    }
+
+    /// Resolves `env` into ordered `(name, value)` pairs.
+    ///
+    /// Top-level `${NAME}` placeholders in a value are expanded against the
+    /// process environment and against variables declared earlier in the same
+    /// list, so a variable can build on one above it (e.g. a `PATH` that
+    /// extends a `PATH` set earlier in the list).
+    pub fn resolved_env(&self) -> Result<Vec<(String, String)>, ConfigError> {
+        let mut resolved: Vec<(String, String)> = Vec::with_capacity(self.env.len());
+        for (i, var) in self.env.iter().enumerate() {
+            let value = expand::expand(&var.value, |key| {
+                if let Some((_, v)) = resolved.iter().rev().find(|(k, _)| k == key) {
+                    return Some(v.clone());
+                }
+                std::env::var(key).ok()
+            })
+            .map_err(|e| ConfigError::Other(format!("invalid env[{i}]: {e}")))?;
+            resolved.push((var.key.clone(), value));
+        }
+        Ok(resolved)
     }
 
     /// `stop_command` with placeholders expanded and resolved via `PATH`.
@@ -268,6 +331,8 @@ struct AppToml<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     args: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<&'a [EnvVar]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cwd: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
@@ -292,6 +357,7 @@ impl<'a> From<&'a App> for AppToml<'a> {
         AppToml {
             command: &app.command,
             args: (!app.args.is_empty()).then_some(app.args.as_slice()),
+            env: (!app.env.is_empty()).then_some(app.env.as_slice()),
             cwd: (!app.cwd.is_empty()).then_some(app.cwd.as_str()),
             // Default is true; persist only the explicit "temporarily off" case.
             enabled: (!app.enabled).then_some(false),
@@ -685,6 +751,10 @@ mod tests {
                 command: explicit_exe.to_string_lossy().into_owned(),
                 enabled: false,
                 args: vec!["--flag".into()],
+                env: vec![EnvVar {
+                    key: "PORT".into(),
+                    value: "3000".into(),
+                }],
                 cwd: r"C:\work".into(),
                 hide_window: true,
                 restart_delay_sec: 3,
@@ -709,6 +779,7 @@ mod tests {
         let minimal = &got[minimal_start..minimal_end];
         for key in [
             "args",
+            "env",
             "cwd",
             "enabled",
             "hide_window",
@@ -757,6 +828,10 @@ mod tests {
                 command: exe.to_string_lossy().into_owned(),
                 enabled: false,
                 args: vec!["--flag".into()],
+                env: vec![EnvVar {
+                    key: "PORT".into(),
+                    value: "3000".into(),
+                }],
                 cwd: r"C:\work".into(),
                 hide_window: true,
                 restart_delay_sec: 3,
@@ -794,6 +869,37 @@ mod tests {
             assert!(idx > prev, "key {key:?} appears out of order:\n{got}");
             prev = idx;
         }
+
+        // `env` is a TOML array of tables, so it lands after the scalar fields.
+        assert!(got.contains("[[app.env]]"), "env table missing:\n{got}");
+    }
+
+    #[test]
+    fn parse_env_accepts_inline_table_array() {
+        // A hand-written config may use the compact inline form; both parse to
+        // the same ordered pairs.
+        let text = r#"
+["app"]
+command = "cmd.exe"
+env = [
+  { key = "NODE_ENV", value = "development" },
+  { key = "PORT", value = "3000" },
+]
+"#;
+        let apps = parse_config(text).unwrap();
+        assert_eq!(
+            apps["app"].env,
+            vec![
+                EnvVar {
+                    key: "NODE_ENV".into(),
+                    value: "development".into(),
+                },
+                EnvVar {
+                    key: "PORT".into(),
+                    value: "3000".into(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -807,6 +913,10 @@ mod tests {
             name: "svc".into(),
             command: exe.to_string_lossy().into_owned(),
             args: vec!["--a".into(), "b c".into()],
+            env: vec![EnvVar {
+                key: "PORT".into(),
+                value: "8080".into(),
+            }],
             cwd: r"C:\bin".into(),
             enabled: false,
             hide_window: true,
@@ -861,5 +971,215 @@ mod tests {
     fn load_rejects_non_table_entry() {
         let err = parse_config("app = 42").unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { .. }));
+    }
+
+    #[test]
+    fn save_omits_env_when_empty_and_writes_it_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let exe = dir.path().join("app.exe");
+        std::fs::write(&exe, b"").unwrap();
+
+        let mut apps = BTreeMap::new();
+        apps.insert(
+            "plain".to_string(),
+            App {
+                command: exe.to_string_lossy().into_owned(),
+                ..App::default()
+            },
+        );
+        apps.insert(
+            "with-env".to_string(),
+            App {
+                command: exe.to_string_lossy().into_owned(),
+                env: vec![EnvVar {
+                    key: "PORT".into(),
+                    value: "3000".into(),
+                }],
+                ..App::default()
+            },
+        );
+
+        save_config(&path, &apps).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+
+        let plain = &got[got.find("[plain]").unwrap()..got.find("[with-env]").unwrap()];
+        assert!(!plain.contains("env"), "env should be omitted:\n{got}");
+        assert!(
+            got.contains("key = \"PORT\"") && got.contains("value = \"3000\""),
+            "env pair should be written:\n{got}"
+        );
+
+        let loaded = load_config(&path).unwrap();
+        assert!(loaded["plain"].env.is_empty());
+        assert_eq!(loaded["with-env"].env.len(), 1);
+        assert_eq!(loaded["with-env"].env[0].key, "PORT");
+        assert_eq!(loaded["with-env"].env[0].value, "3000");
+    }
+
+    #[test]
+    fn env_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let exe = dir.path().join("svc.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let original = App {
+            name: "svc".into(),
+            command: exe.to_string_lossy().into_owned(),
+            env: vec![
+                EnvVar {
+                    key: "PATH".into(),
+                    value: "${PATH};C:\\tools".into(),
+                },
+                EnvVar {
+                    key: "NODE_ENV".into(),
+                    value: "development".into(),
+                },
+            ],
+            ..App::default()
+        };
+        let mut apps = BTreeMap::new();
+        apps.insert("svc".into(), original.clone());
+
+        save_config(&path, &apps).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded["svc"], original);
+    }
+
+    #[test]
+    fn env_accepts_keys_with_dots_and_dashes() {
+        // The pair form exists so a name like `my.app-flag` survives; a TOML
+        // table key would reject it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = App {
+            name: "svc".into(),
+            command: "cmd.exe".into(),
+            env: vec![EnvVar {
+                key: "my.app-flag".into(),
+                value: "1".into(),
+            }],
+            ..App::default()
+        };
+        let mut apps = BTreeMap::new();
+        apps.insert("svc".into(), original.clone());
+
+        save_config(&path, &apps).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded["svc"], original);
+    }
+
+    #[test]
+    fn validate_rejects_empty_env_key() {
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![EnvVar {
+                key: "  ".into(),
+                value: "x".into(),
+            }],
+            ..App::default()
+        };
+        assert!(app.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_env_key_with_space() {
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![EnvVar {
+                key: "MY VAR".into(),
+                value: "x".into(),
+            }],
+            ..App::default()
+        };
+        assert!(app.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_env_key_with_equals() {
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![EnvVar {
+                key: "A=B".into(),
+                value: "x".into(),
+            }],
+            ..App::default()
+        };
+        assert!(app.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_env_value_with_pid_placeholder() {
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![EnvVar {
+                key: "PORT".into(),
+                value: "${PID}".into(),
+            }],
+            ..App::default()
+        };
+        assert!(app.validate().is_err());
+    }
+
+    #[test]
+    fn resolved_env_expands_os_and_prior_names() {
+        std::env::set_var("KANDEL_ENV_BASE", "root");
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![
+                EnvVar {
+                    key: "BASE".into(),
+                    value: "${KANDEL_ENV_BASE}".into(),
+                },
+                EnvVar {
+                    key: "DERIVED".into(),
+                    value: "${BASE}/child".into(),
+                },
+            ],
+            ..App::default()
+        };
+        let resolved = app.resolved_env().unwrap();
+        std::env::remove_var("KANDEL_ENV_BASE");
+        assert_eq!(
+            resolved,
+            [
+                ("BASE".to_string(), "root".to_string()),
+                ("DERIVED".to_string(), "root/child".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolved_env_preserves_order() {
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![
+                EnvVar {
+                    key: "B".into(),
+                    value: "2".into(),
+                },
+                EnvVar {
+                    key: "A".into(),
+                    value: "1".into(),
+                },
+            ],
+            ..App::default()
+        };
+        let resolved = app.resolved_env().unwrap();
+        assert_eq!(resolved[0].0, "B");
+        assert_eq!(resolved[1].0, "A");
+    }
+
+    #[test]
+    fn resolved_env_rejects_undefined_placeholder() {
+        let app = App {
+            command: "cmd.exe".into(),
+            env: vec![EnvVar {
+                key: "X".into(),
+                value: "${KANDEL_DEFINITELY_UNSET}".into(),
+            }],
+            ..App::default()
+        };
+        assert!(app.resolved_env().is_err());
     }
 }

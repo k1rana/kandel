@@ -53,6 +53,7 @@ fn wm_close_stops_a_gui_process_gracefully() {
         args: vec!["--auto".into()],
         cwd: None,
         hide_window: true,
+        env: Vec::new(),
     };
     let child = spawn_with_job_object(&spec).expect("spawning the GUI fixture");
 

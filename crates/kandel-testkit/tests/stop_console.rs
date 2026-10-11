@@ -53,6 +53,7 @@ fn ctrl_break_stops_a_console_process_gracefully() {
         args: vec!["--ready-file".into(), ready.to_string_lossy().into_owned()],
         cwd: None,
         hide_window: true,
+        env: Vec::new(),
     };
     let child = spawn_with_job_object(&spec).expect("spawning the console fixture");
 

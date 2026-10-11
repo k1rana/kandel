@@ -9,10 +9,10 @@ pnpm install   # first time only: Tauri CLI and frontend dependencies
 pnpm dev       # build core + UI, start Vite, then launch the core with -ui
 ```
 
-`pnpm dev` runs the whole stack. It builds both binaries, waits for the Vite dev server, then starts the core with the `-ui` flag, which owns the tray and opens the UI window. That window gets hot reload from Vite, and it also gets live status, because the core is the process that spawned it. Ctrl+C stops everything. Set `KANDEL_CONFIG` to point the core at a scratch config.
+Set `KANDEL_CONFIG` to point the core at a scratch config. Ctrl+C stops everything.
 
 > [!NOTE]
-> `tauri dev` alone is not enough here. It opens its own window with no status pipe, so the UI renders without live state. `pnpm dev` exists to avoid that.
+> Use `pnpm dev`, not `tauri dev`. Only the window the core spawns gets the status pipe, so a UI opened by `tauri dev` renders without live state.
 
 ## Tests
 
@@ -34,10 +34,12 @@ The end-to-end smoke test starts the core against a scratch config, checks that 
 bash scripts/smoke_core.sh
 ```
 
-Integration tests in the `kandel-testkit` crate cover both graceful stop paths by spawning real processes:
+Integration tests in the `kandel-testkit` crate cover both graceful stop paths (`stop_gui` for `WM_CLOSE`, `stop_console` for `CTRL_BREAK_EVENT`). They need an interactive Windows session, which the CI runner provides:
 
 ```bash
 cargo test -p kandel-testkit
 ```
 
-`stop_gui` drives the `WM_CLOSE` path and `stop_console` the `CTRL_BREAK_EVENT` path. Each asserts the target exited with code 0, which a force-terminated process never records (that path always yields 1), so the tests fail if a graceful stop silently regresses to a kill. They need an interactive Windows session, which the CI runner provides.
+## Commit messages
+
+Pushing to `main` cuts a release, and the next version comes from your commits, so use Conventional Commits: `fix` → patch, `feat` → minor, `BREAKING CHANGE` → major.

@@ -8,6 +8,11 @@ node_modules/
 /build/
 *.exe
 
+# WinGet manifests generated from a released installer by
+# scripts/release/winget-manifest.mjs. Submitted to microsoft/winget-pkgs, not
+# authored here.
+/winget/
+
 # Design-review captures (regenerated locally; not part of the source)
 .impeccable/review/
 

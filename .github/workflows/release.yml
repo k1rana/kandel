@@ -1,0 +1,144 @@
+name: Release
+
+# Cuts releases from `main` with semantic-release: it derives the next version
+# from Conventional Commits, bumps the single-source version in Cargo.toml,
+# builds both binaries, publishes the GitHub release with its assets, and
+# commits the bump back (tagged `[skip ci]`, so this workflow does not re-fire).
+#
+# Publishing happens here in CI — never locally. The version is written by
+# `scripts/release/prepare.mjs`; nothing in the repo declares it twice.
+#
+# WinGet is a job *in this workflow*, not a separate release-triggered workflow:
+# the default GITHUB_TOKEN cannot start another workflow from the release it
+# creates, so a `release: [released]` trigger would silently never fire.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type (auto = follow conventional commits)'
+        type: choice
+        required: true
+        default: auto
+        options:
+          - auto
+          - major
+          - minor
+          - patch
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The pnpm version is pinned by `packageManager` in the root package.json.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The UI binary embeds `frontend/dist` at compile time, so the frontend
+      # has to be built before any Rust target that includes it.
+      - name: Build the frontend
+        run: pnpm --dir crates/kandel-ui/frontend build
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  release:
+    name: Release
+    runs-on: windows-latest
+    needs: verify
+    permissions:
+      contents: write # create the release, the tag, and push the version bump
+      issues: write # comment on issues resolved by the release
+      pull-requests: write
+    outputs:
+      released: ${{ steps.semantic.outputs.released }}
+      version: ${{ steps.semantic.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # semantic-release needs the full history and every tag to work out
+          # the last release and the commits since it.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # NSIS (downloaded by `tauri build`) and the packaging zip both need a
+      # Windows host, which this runner provides.
+      - name: Release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: npx semantic-release
+
+  winget:
+    name: Publish to WinGet
+    runs-on: ubuntu-latest
+    needs: release
+    # Opt-in: skip until the package exists in WinGet and WINGET_TOKEN is set.
+    # The very first submission to WinGet is manual; flip the `WINGET_ENABLED`
+    # repository variable to `true` once the package is live there. Without this,
+    # every early release would show a failing job for a package WinGet does not
+    # have yet.
+    if: needs.release.outputs.released == 'true' && vars.WINGET_ENABLED == 'true'
+    steps:
+      # NOTE: this can only *update* an existing WinGet package. The very first
+      # submission for `Tojoo.Kandel` must be made by hand to
+      # microsoft/winget-pkgs; after that this job keeps it current.
+      - uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: Tojoo.Kandel
+          version: ${{ needs.release.outputs.version }}
+          # Only the NSIS installer is a WinGet package; the portable ZIP is not.
+          installers-regex: '-setup\.exe$'
+          max-versions-to-keep: 5
+          token: ${{ secrets.WINGET_TOKEN }}

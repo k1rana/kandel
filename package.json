@@ -9,6 +9,7 @@
     "build:ui": "tauri build --config crates/kandel-ui/tauri.conf.json && shx cp target/release/kandel-ui.exe build/kandel-ui.exe",
     "package": "node scripts/package.mjs",
     "release": "pnpm run build && pnpm run package",
+    "winget": "node scripts/release/winget-manifest.mjs",
     "dev": "node scripts/dev.mjs",
     "test": "cargo test --workspace && pnpm run test:ui",
     "test:ui": "pnpm --dir crates/kandel-ui/frontend test",
@@ -18,7 +19,11 @@
     "clean": "shx rm -rf build target"
   },
   "devDependencies": {
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^11.0.1",
     "@tauri-apps/cli": "^2",
+    "conventional-changelog-conventionalcommits": "^10.4.1",
+    "semantic-release": "^25.0.9",
     "shx": "^0.4.0"
   },
   "packageManager": "pnpm@10.30.3"

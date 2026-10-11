@@ -18,7 +18,12 @@
   function onDown(e: MouseEvent, dir: ResizeDirection) {
     if (e.buttons !== 1) return;
     e.preventDefault();
-    startResizeDragging(dir);
+    // The native drag only starts if the `core:window:allow-start-resize-dragging`
+    // capability is granted; without it the invoke rejects and the corner looks
+    // dead. Surface that instead of letting the rejection go unhandled.
+    startResizeDragging(dir).catch((err) => {
+      console.error(`Could not start a ${dir} resize drag:`, err);
+    });
   }
 </script>
 

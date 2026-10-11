@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kandel",
-  "version": "1.0.0",
   "identifier": "dev.tojoo.kandel",
   "build": {
     "frontendDist": "frontend/dist",

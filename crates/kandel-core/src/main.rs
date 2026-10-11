@@ -48,9 +48,10 @@ fn main() {
     std::process::exit(1);
 }
 
-/// Build version. Overridden at build time via
-/// `KANDEL_VERSION` -> `env!`, falling back to `dev` for local builds.
+/// Build version, single-sourced from the workspace version in `Cargo.toml`.
+/// `KANDEL_VERSION` can still override it at build time (e.g. from a release
+/// tag), but no longer falls back to a hard-coded `dev`.
 pub const VERSION: &str = match option_env!("KANDEL_VERSION") {
     Some(v) => v,
-    None => "dev",
+    None => env!("CARGO_PKG_VERSION"),
 };

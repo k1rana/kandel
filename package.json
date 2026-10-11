@@ -1,6 +1,5 @@
 {
   "name": "kandel",
-  "version": "1.0.0",
   "description": "Per-process supervision for the Windows interactive session. Built with Rust and Tauri.",
   "private": true,
   "scripts": {

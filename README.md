@@ -7,6 +7,8 @@ Kandel
 
 Per-process supervision for the Windows interactive session: launch, monitor, and auto-restart the apps that the Service Control Manager cannot reach.
 
+<img width="100%" alt="Banner Image" src="https://github.com/user-attachments/assets/63d5eb63-81c5-4e30-8e43-55d2edeb14cd" />
+
 ## Why use it
 
 - **Per-process identity, not per-executable.** Each monitored app runs as a child bound to a Windows Job Object, so two `node.exe` instances for two different projects are tracked separately. Closing the job reaps the whole process tree, so nothing is orphaned.

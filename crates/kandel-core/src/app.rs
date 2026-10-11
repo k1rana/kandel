@@ -15,6 +15,7 @@ use kandel_config::{load_config, save_config, App as AppConfig, RuntimeFlags, DE
 use crate::autostart::AutoStartManager;
 use crate::dialog::show_error_dialog;
 use crate::ipc_server::UiManager;
+use crate::logs::LogStore;
 use crate::notify::Notifier;
 use crate::openwith::open_with_dialog;
 use crate::status::MonitorStatus;
@@ -49,6 +50,17 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
     };
 
     let ui = UiManager::new();
+    let logs = Arc::new(LogStore::new(crate::logs::DEFAULT_LOG_CAP));
+    let ui_for_logs = ui.clone();
+
+    // Every captured line and session marker is forwarded to the UI (as a
+    // `logs` event) and retained for the backlog a freshly opened UI fetches.
+    // Installing the sink here means output captured before the UI exists is
+    // still stored; it reaches the UI only once the UI is listening.
+    logs.set_sink(Box::new(move |name, event| {
+        ui_for_logs.send_log(name, event);
+    }));
+
     let ui_for_cb = ui.clone();
     let on_state = Arc::new(move |status: MonitorStatus| {
         ui_for_cb.send(&status);
@@ -59,7 +71,11 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
     // otherwise have nowhere to notify).
     let notifier = Arc::new(Notifier::new());
 
-    let supervisor = Arc::new(Supervisor::new(on_state, Arc::clone(&notifier)));
+    let supervisor = Arc::new(Supervisor::new(
+        on_state,
+        Arc::clone(&notifier),
+        Arc::clone(&logs),
+    ));
     supervisor.reconcile(apps);
     tracing::info!(
         component = "main",
@@ -74,7 +90,8 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
     // depend on reaching the tray icon.
     if flags.open_ui {
         let statuses = supervisor.all_statuses();
-        if let Err(e) = ui.show(&flags, &statuses) {
+        let backlog = logs.snapshot();
+        if let Err(e) = ui.show(&flags, &statuses, &backlog) {
             tracing::error!(component = "main", error = %e, "failed to open the UI at startup");
         }
     }
@@ -85,6 +102,7 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
     let ui_for_open = ui.clone();
     let flags_for_open = flags.clone();
     let config_path_for_config = config_path.clone();
+    let logs_for_open = Arc::clone(&logs);
 
     let result = tray::run(
         version,
@@ -92,10 +110,11 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
         notifier,
         TrayCallbacks {
             on_open_ui: Box::new(move || {
-                // Push the current statuses immediately so the table is not empty
-                // until the next state change.
+                // Push the current statuses and log backlog immediately so the
+                // table and any open log are not empty until the next change.
                 let statuses = supervisor_for_open.all_statuses();
-                if let Err(e) = ui_for_open.show(&flags_for_open, &statuses) {
+                let backlog = logs_for_open.snapshot();
+                if let Err(e) = ui_for_open.show(&flags_for_open, &statuses, &backlog) {
                     tracing::error!(component = "main", error = %e, "failed to show UI");
                 }
             }),

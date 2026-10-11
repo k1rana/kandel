@@ -46,6 +46,7 @@ pub fn run(config_path: PathBuf, ipc_mode: bool) {
             commands::get_command_extensions,
             commands::select_command_path,
             ipc::get_initial_statuses,
+            ipc::get_app_logs,
         ])
         .setup(move |app| {
             // Tweak the DWM chrome (remove the Windows 11 accent border, opt

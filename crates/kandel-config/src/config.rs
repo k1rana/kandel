@@ -23,6 +23,14 @@ pub const DEFAULT_STOP_TIMEOUT_SEC: i64 = 5;
 pub const DEFAULT_MAX_RETRIES: i64 = -1;
 /// Default `enabled` when the field is omitted.
 pub const DEFAULT_ENABLED: bool = true;
+/// Default `capture_output` when the field is omitted.
+///
+/// On by default, so a managed process's stderr (and stdout) is visible in the
+/// UI without the user having to opt in. Capture is safe for stdin-reading
+/// programs because the child's stdin is a live pipe the core keeps open, not
+/// `NUL`; a stdio server (MCP/LSP) therefore blocks on input instead of seeing
+/// EOF and exiting.
+pub const DEFAULT_CAPTURE_OUTPUT: bool = true;
 
 /// Error produced while loading, validating, or saving a configuration.
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +119,20 @@ pub struct App {
     /// Whether to launch the process with a hidden window.
     #[serde(default)]
     pub hide_window: bool,
+    /// Whether to redirect the process's stdout/stderr into its UI log.
+    ///
+    /// Defaults to `true`, so a process's stderr — including the diagnostics a
+    /// stdio server prints when something goes wrong (a failed HTTP call, say)
+    /// — is visible in the UI without opting in.
+    ///
+    /// Capture redirects stdout, stderr, **and** stdin. The child's stdin is a
+    /// live pipe whose write end the core holds open, so a program that reads
+    /// stdin (an MCP/LSP server, an interactive tool) blocks waiting for input
+    /// rather than seeing `NUL`/EOF and exiting. `command`, `args`, `env`, and
+    /// `cwd` are still launched exactly as configured — only the standard
+    /// handles change.
+    #[serde(default = "default_capture_output")]
+    pub capture_output: bool,
     /// Retry limit for a crashing app. Negative means infinite.
     #[serde(default = "default_max_retries")]
     pub max_retries: i64,
@@ -121,6 +143,9 @@ pub struct App {
 
 fn default_enabled() -> bool {
     DEFAULT_ENABLED
+}
+fn default_capture_output() -> bool {
+    DEFAULT_CAPTURE_OUTPUT
 }
 fn default_max_retries() -> i64 {
     DEFAULT_MAX_RETRIES
@@ -143,6 +168,7 @@ impl Default for App {
             restart_delay_sec: 0,
             healthy_timeout_sec: 0,
             hide_window: false,
+            capture_output: DEFAULT_CAPTURE_OUTPUT,
             max_retries: DEFAULT_MAX_RETRIES,
             stop_timeout_sec: DEFAULT_STOP_TIMEOUT_SEC,
         }
@@ -338,6 +364,9 @@ struct AppToml<'a> {
     enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hide_window: Option<bool>,
+    // Default is true; persist only the explicit "do not capture" case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_output: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_command: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,6 +391,7 @@ impl<'a> From<&'a App> for AppToml<'a> {
             // Default is true; persist only the explicit "temporarily off" case.
             enabled: (!app.enabled).then_some(false),
             hide_window: app.hide_window.then_some(true),
+            capture_output: (!app.capture_output).then_some(false),
             stop_command: (!app.stop_command.is_empty()).then_some(app.stop_command.as_str()),
             stop_args: (!app.stop_args.is_empty()).then_some(app.stop_args.as_slice()),
             stop_timeout_sec: (app.stop_timeout_sec != DEFAULT_STOP_TIMEOUT_SEC)
@@ -757,6 +787,7 @@ mod tests {
                 }],
                 cwd: r"C:\work".into(),
                 hide_window: true,
+                capture_output: false,
                 restart_delay_sec: 3,
                 healthy_timeout_sec: 60,
                 max_retries: 0,
@@ -783,6 +814,7 @@ mod tests {
             "cwd",
             "enabled",
             "hide_window",
+            "capture_output",
             "restart_delay_sec",
             "healthy_timeout_sec",
             "max_retries",
@@ -801,6 +833,7 @@ mod tests {
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded["minimal"].max_retries, -1);
         assert!(loaded["minimal"].enabled);
+        assert!(loaded["minimal"].capture_output, "capture must default on");
         assert_eq!(loaded["minimal"].stop_timeout_sec, 5);
         assert_eq!(loaded["explicit"].max_retries, 0);
         assert!(!loaded["explicit"].enabled);
@@ -903,6 +936,24 @@ env = [
     }
 
     #[test]
+    fn capture_output_defaults_to_on_and_can_be_disabled() {
+        // Capture is on by default so a process's stderr is visible in the UI.
+        // It is safe for stdin-reading programs because the child's stdin is a
+        // live pipe (see the core's spawn path), not `NUL`.
+        let app: App = parse_config("[\"a\"]\ncommand = \"cmd.exe\"\n")
+            .unwrap()
+            .remove("a")
+            .unwrap();
+        assert!(app.capture_output);
+
+        let off: App = parse_config("[\"a\"]\ncommand = \"cmd.exe\"\ncapture_output = false\n")
+            .unwrap()
+            .remove("a")
+            .unwrap();
+        assert!(!off.capture_output);
+    }
+
+    #[test]
     fn save_then_load_round_trips_explicit_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -926,6 +977,7 @@ env = [
             stop_command: "taskkill".into(),
             stop_args: vec!["/PID".into(), "${PID}".into()],
             stop_timeout_sec: 9,
+            capture_output: false,
         };
         let mut apps = BTreeMap::new();
         apps.insert("svc".into(), original.clone());

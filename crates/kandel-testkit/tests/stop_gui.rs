@@ -54,8 +54,9 @@ fn wm_close_stops_a_gui_process_gracefully() {
         cwd: None,
         hide_window: true,
         env: Vec::new(),
+        capture_output: false,
     };
-    let child = spawn_with_job_object(&spec).expect("spawning the GUI fixture");
+    let child = spawn_with_job_object(&spec, None).expect("spawning the GUI fixture");
 
     assert!(
         wait_for_window(child.pid, Duration::from_secs(10)),

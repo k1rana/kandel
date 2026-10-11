@@ -5,15 +5,17 @@ import {
   caseInsensitiveComparator,
   clampInt,
   extractAppNameFromPath,
+  formatClock,
   formatCommandLine,
   isSupportedCommandFile,
+  logRows,
   normalizeEnv,
   rowsFromConfig,
   sanitizeEnvKey,
   stateView,
   summarize,
 } from "./format";
-import type { AppStateInfo } from "./types";
+import type { AppStateInfo, LogEvent } from "./types";
 
 function status(overrides: Partial<AppStateInfo> = {}): AppStateInfo {
   return {
@@ -85,6 +87,38 @@ describe("sanitizeEnvKey", () => {
     expect(sanitizeEnvKey("my.app-flag")).toBe("my.app-flag");
     // `=` is left for validation, not silently rewritten.
     expect(sanitizeEnvKey("A=B")).toBe("A=B");
+  });
+});
+
+describe("logRows", () => {
+  it("maps started events to dividers and lines to rows", () => {
+    const events: LogEvent[] = [
+      { type: "started", ts: 1000 },
+      { type: "line", ts: 1001, stream: "stdout", text: "hello" },
+      { type: "line", ts: 1002, stream: "stderr", text: "oops" },
+    ];
+    expect(logRows(events)).toEqual([
+      { kind: "divider", ts: 1000 },
+      { kind: "line", ts: 1001, stream: "stdout", text: "hello" },
+      { kind: "line", ts: 1002, stream: "stderr", text: "oops" },
+    ]);
+  });
+
+  it("returns nothing for no events", () => {
+    expect(logRows([])).toEqual([]);
+  });
+});
+
+describe("formatClock", () => {
+  it("formats a timestamp as HH:MM:SS", () => {
+    // Construct from local time so the assertion is timezone-independent.
+    const d = new Date(2024, 0, 1, 9, 5, 3);
+    expect(formatClock(d.getTime())).toBe("09:05:03");
+  });
+
+  it("zero-pads each field", () => {
+    const d = new Date(2024, 0, 1, 0, 0, 0);
+    expect(formatClock(d.getTime())).toBe("00:00:00");
   });
 });
 

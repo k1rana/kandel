@@ -51,11 +51,13 @@ pub fn decide(current: &App, desired: &App) -> Action {
 /// Returns true when any process-identity field changed, which requires a full
 /// process restart.
 ///
-/// Process-identity fields: `command`, `args`, `env`, `cwd`, `hide_window`.
+/// Process-identity fields: `command`, `args`, `env`, `cwd`, `hide_window`,
+/// `capture_output`.
 pub fn has_identity_changed(current: &App, desired: &App) -> bool {
     current.command != desired.command
         || current.cwd != desired.cwd
         || current.hide_window != desired.hide_window
+        || current.capture_output != desired.capture_output
         || current.args != desired.args
         || current.env != desired.env
 }
@@ -127,6 +129,16 @@ mod tests {
             key: "PORT".into(),
             value: "3000".into(),
         }];
+        assert!(has_identity_changed(&current, &desired));
+    }
+
+    #[test]
+    fn identity_change_on_capture_output() {
+        // Turning capture on or off only takes effect at launch, so it must
+        // restart the process like any other identity field.
+        let current = app();
+        let mut desired = current.clone();
+        desired.capture_output = !current.capture_output;
         assert!(has_identity_changed(&current, &desired));
     }
 

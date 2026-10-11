@@ -23,10 +23,9 @@ On Linux, `systemd` supervises processes out of the box. On Windows the equivale
 - [Usage](#usage)
 - [Behavior notes](#behavior-notes)
 - [Advanced usage](#advanced-usage)
+- [Viewing logs](#viewing-logs)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
-- [Development](#development)
-- [Tests](#tests)
 - [License](#license)
 
 ## Installation
@@ -96,6 +95,7 @@ Each top-level TOML table (`[name]`) defines one monitored app. `name` is the id
 | `cwd`                 | String       | Directory of resolved `command` | Working directory when launching the process.                                     |
 | `enabled`             | Boolean      | `true`                          | Whether Kandel launches and monitors this app.                                    |
 | `hide_window`         | Boolean      | `false`                         | If `true`, launches the process with a hidden window.                             |
+| `capture_output`      | Boolean      | `true`                          | If `true`, the process's stdout/stderr are captured into its UI log. The child is given a hidden console so console tools work. Set `false` to leave all standard handles untouched. See [Viewing logs](#viewing-logs). |
 | `restart_delay_sec`   | Integer      | `0`                             | Wait time (seconds) before attempting a restart after detecting termination.      |
 | `max_retries`         | Integer      | `-1` (infinite)                 | Retry limit for a crashing app. `0` disables retry; negative means infinite.      |
 | `healthy_timeout_sec` | Integer      | `0`                             | If the process runs this long before exiting, the restart counter resets. `0` disables the reset. |
@@ -118,6 +118,7 @@ Each top-level TOML table (`[name]`) defines one monitored app. `name` is the id
 ### Management UI
 
 - **Rows** are one entry each: a state marker, name, command, state word, PID, and restart count. Double-click to edit; right-click to restart, pause, or resume.
+- **View log** (right-click a row) opens a read-only panel of that app's captured output, with a timestamped divider per launch.
 - **Add app** (the lime button) opens the editor. You can also drop an executable or script onto the window to start a new entry with its command filled in.
 - **Theme**: the topbar toggle cycles **Auto, Light, Dark**. *Auto* follows your Windows setting and updates when it changes. The choice is remembered between launches.
 
@@ -134,8 +135,6 @@ The visual system is documented in [`DESIGN.md`](./DESIGN.md).
 
 - **Config changes are atomic or ignored.** The core watches the file through a debounced watcher. A partially written file fails to parse, so the previous state stays in effect until a valid version lands.
 - **Job Object cleanup is absolute.** Each child is bound to a job with kill-on-close, so quitting the core, or losing it, takes down every managed process and its descendants.
-- **Restart counters respect `healthy_timeout_sec`.** A process that stays up past the timeout resets its retry counter, so a long-running app that crashes once is not treated like a crash loop.
-- **`max_retries` distinguishes the three cases.** `-1` retries forever, `0` never retries, and a positive number caps the attempts.
 - **The UI holds no process state.** Every change the UI makes goes through `config.toml`; the core is the only writer of process lifecycle.
 
 ## Advanced usage
@@ -207,6 +206,49 @@ If `stop_command` is set, Kandel runs it first and waits up to `stop_timeout_sec
 2. Otherwise, send `CTRL_BREAK_EVENT` to the child's process group.
 3. If the process is still alive after `stop_timeout_sec`, call `TerminateProcess`.
 
+## Viewing logs
+
+Right-click a row and choose **View log** to see everything the app has written to
+stdout and stderr, including the diagnostics a stdio server prints when
+something goes wrong (a failed HTTP call inside an MCP server, for example).
+
+> [!IMPORTANT]
+> Capture redirects the child's **stdout and stderr**. Two Windows details keep
+> it broadly compatible: the child is given a **hidden console**
+> (`CREATE_NO_WINDOW`) so console tools such as `timeout` run, and its **stdin is
+> left as-is** (not piped) so a stdin reader is not torn down. The core is a GUI
+> process with no console of its own, which is why the child is given one.
+>
+> Set `capture_output = false` to leave every standard handle exactly as Windows
+> would give it.
+
+The panel is read-only and shows the app's history **from the core's start**, not
+just the current run:
+
+- Each launch begins with a timestamped **process started** divider, so the
+  history reads as a sequence of sessions. A restart appends; it does not clear
+  what came before.
+- Each line carries its time, an `out`/`err` tag, and its text; `stderr` is shown
+  in the failure colour.
+- **Follow** keeps the newest line in view. Scrolling up pauses it so you can
+  read history; returning to the bottom resumes it.
+- The buffer is bounded (the most recent 2000 events per app), so a chatty app
+  cannot grow it without limit. It is in-memory only: it is a *view* of this
+  session's output, not a durable log. To keep output permanently, have the app
+  write its own file.
+
+### What capture does and does not change
+
+Capture is a **launch-handle** concern only. It redirects the child's standard
+output into a pipe; `command`, `args`, `env`, and `cwd` are launched exactly as
+configured, and the child still inherits the environment.
+
+> [!NOTE]
+> Because stdout is a pipe rather than a console, a program that checks for a TTY
+> may change its behaviour: colours may be disabled, and output may be
+> block-buffered (so lines appear only once a buffer fills or the process exits).
+> Set `capture_output = false` if an entry needs its own console.
+
 ## Troubleshooting
 
 - **The core exits right after launch and shows an error dialog.** `config.toml` failed to parse. Fix the TOML and start Kandel again.
@@ -242,50 +284,7 @@ This produces:
 
 `pnpm run release` builds both and packages them into `build/kandel-<version>-windows-amd64.zip`.
 
-## Development
-
-```bash
-pnpm install   # first time only: Tauri CLI and frontend dependencies
-pnpm dev       # build core + UI, start Vite, then launch the core with -ui
-```
-
-`pnpm dev` runs the whole stack. It builds both binaries, waits for the Vite dev server, then starts the core with the `-ui` flag, which owns the tray and opens the UI window. That window gets hot reload from Vite, and it also gets live status, because the core is the process that spawned it. Ctrl+C stops everything. Set `KANDEL_CONFIG` to point the core at a scratch config.
-
-> [!NOTE]
-> `tauri dev` alone is not enough here. It opens its own window with no status pipe, so the UI renders without live state. `pnpm dev` exists to avoid that.
-
-## Tests
-
-```bash
-# Rust: portable config logic, reconciliation, Windows supervision
-cargo test --workspace
-
-# Frontend: pure helper functions
-pnpm run test:ui
-
-# Everything, plus lints
-pnpm test
-pnpm run check
-```
-
-The end-to-end smoke test starts the core against a scratch config, checks that it spawns the managed child, then confirms that exiting the core reaps the process tree through the Job Object:
-
-```bash
-bash scripts/smoke_core.sh
-```
-
-Integration tests in the `kandel-testkit` crate cover both graceful stop paths
-by spawning real processes:
-
-```bash
-cargo test -p kandel-testkit
-```
-
-`stop_gui` drives the `WM_CLOSE` path and `stop_console` the `CTRL_BREAK_EVENT`
-path. Each asserts the target exited with code 0, which a force-terminated
-process never records (that path always yields 1), so the tests fail if a
-graceful stop silently regresses to a kill. They need an interactive Windows
-session, which the CI runner provides.
+For the dev setup and the test commands, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 

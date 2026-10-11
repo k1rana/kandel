@@ -1,7 +1,7 @@
 /** Pure helpers used by the UI. Kept free of DOM/Tauri dependencies so they are
  * straightforward to unit test. */
 
-import type { AppStateInfo, EnvVar } from "./types";
+import type { AppStateInfo, EnvVar, LogEvent } from "./types";
 
 /** Normalizes edited environment pairs into the persisted form.
  *
@@ -28,6 +28,33 @@ export function normalizeEnv(pairs: EnvVar[]): EnvVar[] {
  */
 export function sanitizeEnvKey(name: string): string {
   return name.replace(/\s/g, "_");
+}
+
+/** Formats an event timestamp as wall-clock `HH:MM:SS`. */
+export function formatClock(ts: number): string {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+/** A log event flattened for rendering: dividers or lines. */
+export type LogRow =
+  | { kind: "divider"; ts: number }
+  | { kind: "line"; ts: number; stream: string; text: string };
+
+/** Maps raw log events to render rows, dropping anything malformed. */
+export function logRows(events: LogEvent[]): LogRow[] {
+  const rows: LogRow[] = [];
+  for (const e of events) {
+    if (e.type === "started") {
+      rows.push({ kind: "divider", ts: e.ts });
+    } else if (e.type === "line") {
+      rows.push({ kind: "line", ts: e.ts, stream: e.stream, text: e.text });
+    }
+  }
+  return rows;
 }
 
 /** Extracts a suggested app name from a command path (filename without extension). */

@@ -14,15 +14,19 @@
     applyStateUpdate,
     clampInt,
     extractAppNameFromPath,
+    formatClock,
     formatCommandLine,
     isSupportedCommandFile,
+    logRows,
     normalizeEnv,
     rowsFromConfig,
     sanitizeEnvKey,
     stateView,
     summarize,
+    type LogRow,
   } from "./lib/format";
-  import { makeEmptyForm, type AppConfig, type AppStateInfo } from "./lib/types";
+  import { onLogUpdate, getAppLogs } from "./lib/api";
+  import { makeEmptyForm, type AppConfig, type AppStateInfo, type LogEvent } from "./lib/types";
   import ResizeHandles from "./lib/ResizeHandles.svelte";
   import Titlebar from "./lib/Titlebar.svelte";
   import { isWindowMaximized, onWindowResized } from "./lib/window";
@@ -110,6 +114,27 @@
   let rowMenu = $state({ visible: false, x: 0, y: 0, name: "", enabled: false });
   let restarting = $state<Record<string, boolean>>({});
 
+  // ── Log panel state ──────────────────────────────────────────────────────
+  // The log panel is a read-only view of one app's captured output. It opens
+  // from the row menu, is independent of the editor, and keeps a rolling buffer
+  // per app so switching between apps does not lose history.
+  let logPanelOpen = $state(false);
+  let logAppName = $state("");
+  let logEvents = $state<LogEvent[]>([]);
+  let logFollow = $state(true);
+  let logScrollerEl = $state<HTMLElement | null>(null);
+  const logRowsByApp: Record<string, LogEvent[]> = {};
+
+  function appendLogEvent(name: string, event: LogEvent) {
+    const buffer = logRowsByApp[name] ?? (logRowsByApp[name] = []);
+    buffer.push(event);
+    // Bound the buffer so a chatty app cannot grow the UI without limit.
+    if (buffer.length > 2000) buffer.splice(0, buffer.length - 2000);
+    if (logPanelOpen && logAppName === name) {
+      logEvents = [...buffer];
+    }
+  }
+
   // ── Drop-target state ────────────────────────────────────────────────────
   let dragActive = $state(false);
 
@@ -123,6 +148,7 @@
     const onKeydown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (rowMenu.visible) closeRowMenu();
+        else if (logPanelOpen) closeLogPanel();
         else if (editorOpen) closeEditor();
       }
     };
@@ -162,6 +188,11 @@
         }
       }
 
+      // Log events arrive on their own stream, keyed by app name.
+      await onLogUpdate((update) => {
+        appendLogEvent(update.name, update.event);
+      });
+
       await getCurrentWebview().onDragDropEvent((event) => {
         if (event.payload.type === "over") {
           dragActive = true;
@@ -192,6 +223,68 @@
   function displayState(app: AppStateInfo) {
     return app.enabled ? stateView(app.state) : { label: "Paused", tone: "idle" as const, healthy: false };
   }
+
+  // ── Log panel ────────────────────────────────────────────────────────────
+
+  let logView = $derived<LogRow[]>(logRows(logEvents));
+
+  /** Opens the log panel for `appName`, seeding it from the buffered history. */
+  async function openLogPanel(appName: string) {
+    logAppName = appName;
+    logEvents = [...(logRowsByApp[appName] ?? [])];
+    logFollow = true;
+    logPanelOpen = true;
+    // The UI's own stdin listener may already hold lines this client has not
+    // applied yet (for example if the panel was closed when they arrived).
+    try {
+      const buffered = await getAppLogs(appName);
+      if (logEvents.length === 0 && buffered.length > 0) {
+        const parsed: LogEvent[] = [];
+        for (const line of buffered) {
+          try {
+            const value = JSON.parse(line) as { event?: LogEvent };
+            if (value.event) parsed.push(value.event);
+          } catch {
+            // Ignore a malformed buffered line.
+          }
+        }
+        logRowsByApp[appName] = parsed;
+        logEvents = [...parsed];
+      }
+    } catch (e) {
+      console.error("Failed to load the log backlog:", e);
+    }
+    await tick();
+    scrollLogToEnd();
+  }
+
+  function closeLogPanel() {
+    logPanelOpen = false;
+    logAppName = "";
+  }
+
+  /** Keeps the view pinned to the newest line while follow mode is on. */
+  function scrollLogToEnd() {
+    if (!logFollow) return;
+    const el = logScrollerEl;
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  /** Called after each render; keeps the newest line in view when following. */
+  function onLogScroll() {
+    const el = logScrollerEl;
+    if (!el) return;
+    // Leaving the bottom turns follow off, so a user reading history is not
+    // yanked back down by new lines; returning to the bottom re-arms it.
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    logFollow = atBottom;
+  }
+
+  // Pin the view to the newest line after each render while following.
+  $effect(() => {
+    void logView.length;
+    scrollLogToEnd();
+  });
 
   function openEditor(appName: string) {
     errorMessage = "";
@@ -546,6 +639,16 @@
       role="menuitem"
       onclick={() => {
         closeRowMenu();
+        openLogPanel(rowMenu.name);
+      }}
+    >
+      View log…
+    </button>
+    <button
+      class="rowmenu-item"
+      role="menuitem"
+      onclick={() => {
+        closeRowMenu();
         openEditor(rowMenu.name);
       }}
     >
@@ -698,6 +801,10 @@
               <input type="checkbox" bind:checked={editForm.hideWindow} />
               <span>Run hidden</span>
             </label>
+            <label class="check">
+              <input type="checkbox" bind:checked={editForm.captureOutput} />
+              <span>Capture output</span>
+            </label>
           </div>
 
           <div class="divider span2"><span>Restart policy</span></div>
@@ -785,6 +892,71 @@
         </button>
       </footer>
     {/if}
+  </div>
+{/if}
+
+<!-- Log panel -->
+{#if logPanelOpen}
+  <div class="scrim" onclick={closeLogPanel} role="presentation"></div>
+  <div
+    class="panel panel-log"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="log-title"
+  >
+    <header class="panel-head">
+      <h2 id="log-title"><span class="log-app">{logAppName}</span> log</h2>
+      <button class="panel-x" type="button" aria-label="Close" onclick={closeLogPanel}>
+        <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+          <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.4" />
+        </svg>
+      </button>
+    </header>
+
+    <div class="log-wrap">
+      {#if logView.length === 0}
+        <p class="log-empty">
+          Nothing captured yet. Output appears here once the app writes to stdout or
+          stderr.
+        </p>
+      {:else}
+        <!-- A scrollable region must be reachable by keyboard; the tabindex is
+             the documented a11y remedy, which svelte-check cannot infer. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div
+          class="log-scroll"
+          bind:this={logScrollerEl}
+          onscroll={onLogScroll}
+          role="log"
+          aria-label="{logAppName} output"
+          tabindex="0"
+        >
+          {#each logView as row, i (i)}
+            {#if row.kind === "divider"}
+              <div class="log-session">
+                <span class="tnum">{formatClock(row.ts)}</span>
+                <span class="log-session-label">process started</span>
+              </div>
+            {:else}
+              <div class="log-line" class:is-err={row.stream === "stderr"}>
+                <span class="log-ts tnum">{formatClock(row.ts)}</span>
+                <span class="log-stream">{row.stream === "stderr" ? "err" : "out"}</span>
+                <span class="log-text selectable">{row.text}</span>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
+    </div>
+
+    <footer class="panel-foot">
+      <label class="check">
+        <input type="checkbox" bind:checked={logFollow} onchange={scrollLogToEnd} />
+        <span>Follow</span>
+      </label>
+      <span class="grow"></span>
+      <button class="ghost" type="button" onclick={closeLogPanel}>Close</button>
+    </footer>
   </div>
 {/if}
 
@@ -1399,5 +1571,93 @@
   }
   .env-add {
     align-self: flex-start;
+  }
+
+  /* ── Log panel ──────────────────────────────────────────────────────────── */
+  /* Wider than the editor: log lines are long and the panel is a reading
+     surface, not a form. Same chrome, so it stays one vocabulary. */
+  .panel-log {
+    width: min(880px, calc(100vw - 2 * var(--s-32)));
+  }
+  .log-app {
+    /* The app name is the panel's identity; the word "log" stays secondary. */
+    font-weight: var(--w-medium);
+  }
+
+  .log-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .log-scroll {
+    flex: 1;
+    min-height: 0;
+    margin: var(--s-16) var(--s-24);
+    padding: var(--s-8) 0;
+    background: var(--well);
+    border: 1px solid var(--ash);
+    border-radius: var(--r-inner);
+    overflow-y: auto;
+    overflow-x: hidden;
+    font-size: var(--text-caption);
+    line-height: 1.5;
+  }
+
+  .log-empty {
+    margin: 0;
+    padding: var(--s-24);
+    color: var(--graphite);
+    font-size: var(--text-body-sm);
+  }
+
+  .log-session {
+    display: flex;
+    align-items: center;
+    gap: var(--s-8);
+    margin: var(--s-12) var(--s-16) var(--s-4);
+    color: var(--graphite);
+    font-size: var(--text-eyebrow);
+    font-weight: var(--w-medium);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-micaps);
+  }
+  .log-session::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--ash);
+  }
+
+  .log-line {
+    display: grid;
+    /* Timestamp, stream tag, text. Tabular figures keep the gutter aligned. */
+    grid-template-columns: 64px 28px minmax(0, 1fr);
+    gap: var(--s-8);
+    padding: 2px var(--s-16);
+  }
+  .log-line:hover {
+    background: var(--wash);
+  }
+  .log-ts {
+    color: var(--stone);
+    white-space: nowrap;
+  }
+  .log-stream {
+    color: var(--graphite);
+    font-size: var(--text-eyebrow);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-micaps);
+    padding-top: 2px;
+  }
+  /* stderr is meaning-bearing state colour, as the design permits. */
+  .log-line.is-err .log-stream,
+  .log-line.is-err .log-text {
+    color: var(--alert);
+  }
+  .log-text {
+    color: var(--ink);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 </style>

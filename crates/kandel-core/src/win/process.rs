@@ -8,25 +8,42 @@
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, STILL_ACTIVE,
+    WAIT_OBJECT_0,
+};
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
+use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
-    STARTF_USESHOWWINDOW, STARTUPINFOW,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
 use kandel_config::App;
 
 use super::cmdline;
+use super::SendHandle;
+
+/// Sink invoked for each captured output line: `(stream, text)`. The stream is
+/// one of the `STREAM_*` names in [`crate::logs`].
+pub type LineSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Longest single captured line before it is flushed as-is. Guards against a
+/// process that emits an enormous newline-free run.
+const MAX_CAPTURE_LINE: usize = 64 * 1024;
 
 /// A Job Object handle. Dropping it closes the handle, which — because the job
 /// was created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — terminates the
@@ -79,9 +96,31 @@ pub struct ChildProcess {
     process_handle: HANDLE,
     /// The job owning this process tree. Dropping it kills the tree.
     pub job: JobObject,
+    /// Reader threads draining the child's captured output, if any.
+    capture_threads: Vec<JoinHandle<()>>,
 }
 
 impl ChildProcess {
+    /// Waits (bounded) for the capture reader threads to drain and exit.
+    ///
+    /// A no-op when output is not being captured. Called after the process has
+    /// exited or been stopped, so the UI log is complete before the next
+    /// session. The bounded wait means a grandchild keeping the pipe open can
+    /// never hang the monitor thread.
+    pub fn join_capture(&mut self) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !self.capture_threads.is_empty() && Instant::now() < deadline {
+            self.capture_threads.retain(|t| !t.is_finished());
+            if !self.capture_threads.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        // Any thread still running is left to finish on its own; it holds only
+        // the pipe handle and its sink, both of which are safe to outlive the
+        // monitor.
+        self.capture_threads.clear();
+    }
+
     /// Waits up to `timeout` for the process to exit.
     ///
     /// Returns `true` if the process exited within the window. A `None` timeout
@@ -149,6 +188,11 @@ pub struct LaunchSpec {
     /// Environment variables to set on the child, as resolved `(name, value)`
     /// pairs. Empty means the child inherits the core's environment unchanged.
     pub env: Vec<(String, String)>,
+    /// Whether to redirect the child's stdout/stderr into the log.
+    ///
+    /// This is purely a launch concern and never alters `program`, `args`,
+    /// `env`, or `cwd`.
+    pub capture_output: bool,
 }
 
 impl LaunchSpec {
@@ -173,12 +217,18 @@ impl LaunchSpec {
             cwd,
             hide_window: app.hide_window,
             env,
+            capture_output: app.capture_output,
         })
     }
 }
 
 /// Spawns `spec` suspended, assigns it to a fresh Job Object, then resumes it.
-pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
+///
+/// When `spec.capture_output` is set and a `sink` is supplied, the child's
+/// stdout and stderr are redirected into pipes and drained by reader threads
+/// that invoke `sink(stream, line)`. Capture only touches the output handles:
+/// `program`, `args`, `env`, and `cwd` are launched exactly as configured.
+pub fn spawn_with_job_object(spec: &LaunchSpec, sink: Option<LineSink>) -> Result<ChildProcess> {
     let job = JobObject::new()?;
 
     let command_line = cmdline::build_command_line(&spec.program, &spec.args);
@@ -218,14 +268,56 @@ pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
         si.wShowWindow = 0;
     }
 
+    // The core is a GUI-subsystem process with no console, so without this a
+    // child inherits "no console" — and any program that needs one refuses to
+    // run (`timeout.exe`, for instance, prints "Input redirection is not
+    // supported" and exits at once). `CREATE_NO_WINDOW` gives the child its own
+    // console with **no visible window**, which is exactly right for a
+    // background supervisor: console tools work, and a GUI app still shows its
+    // own windows normally.
+    creation_flags |= CREATE_NO_WINDOW;
+
+    let capture = if spec.capture_output { sink } else { None };
+    let mut capture_ctx = None;
+    let mut inherits = false;
+
+    if let Some(sink) = capture {
+        // Only stdout and stderr are redirected; stdin is left **unset** in
+        // `STARTUPINFOW` (a NULL handle). That is deliberate and load-bearing:
+        //
+        //   * Console tools reject a *piped* stdin (`timeout.exe`: "Input
+        //     redirection is not supported"). A NULL stdin is not a pipe, so
+        //     with the console from `CREATE_NO_WINDOW` they run normally.
+        //   * A program that reads stdin does not see a handler that reports an
+        //     immediate EOF the way an explicit `NUL` file would; it inherits the
+        //     child's console input, so an interactive reader is not torn down.
+        //
+        // Redirecting stdin to a private pipe broke console tools; redirecting
+        // it to `NUL` broke stdin readers. Leaving it NULL is the middle path
+        // that keeps both working while stdout/stderr are still captured.
+        let (out_read, out_write) = create_capture_pipe()?;
+        let (err_read, err_write) = create_capture_pipe()?;
+        let handles = CaptureHandles {
+            out_write: SendHandle(out_write),
+            err_write: SendHandle(err_write),
+        };
+
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdInput = HANDLE::default();
+        si.hStdOutput = out_write;
+        si.hStdError = err_write;
+        inherits = true;
+        capture_ctx = Some((handles, out_read, err_read, sink));
+    }
+
     let mut pi = PROCESS_INFORMATION::default();
-    unsafe {
+    let spawn_result = unsafe {
         CreateProcessW(
             PCWSTR::null(),
             Some(PWSTR(command_wide.as_mut_ptr())),
             None,
             None,
-            false,
+            inherits,
             creation_flags,
             Some(env_ptr as *const std::ffi::c_void),
             cwd_wide
@@ -234,8 +326,60 @@ pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
             &si,
             &mut pi,
         )
+    };
+
+    if let Err(e) = spawn_result {
+        // Close the parent-side handles we opened, so a failed launch leaks
+        // nothing.
+        if let Some((handles, out_read, err_read, _)) = capture_ctx.take() {
+            close_parent_handles(&handles);
+            unsafe {
+                let _ = CloseHandle(out_read);
+                let _ = CloseHandle(err_read);
+            }
+        }
+        return Err(anyhow::Error::new(e).context("CreateProcess"));
     }
-    .context("CreateProcess")?;
+
+    // In the parent, the child's write ends are no longer needed. Closing them
+    // here is what lets the reader threads observe EOF once the child (and any
+    // descendant sharing the handles) exits.
+    let mut capture_threads = Vec::new();
+    if let Some((handles, out_read, err_read, sink)) = capture_ctx.take() {
+        let out_sink = Arc::clone(&sink);
+        let err_sink = Arc::clone(&sink);
+        // `HANDLE` is not `Send`; the `SendHandle` wrapper carries it across the
+        // thread boundary, which is sound because kernel handles are
+        // process-wide. Each thread owns its read end and closes it on exit.
+        let out_read = SendHandle(out_read);
+        let err_read = SendHandle(err_read);
+        capture_threads.push(
+            thread::Builder::new()
+                .name("kandel-capture-out".into())
+                .spawn(move || {
+                    read_pipe_lines(out_read.raw(), crate::logs::STREAM_STDOUT, &out_sink);
+                    unsafe {
+                        let _ = CloseHandle(out_read.raw());
+                    }
+                })
+                .context("spawning stdout capture thread")?,
+        );
+        capture_threads.push(
+            thread::Builder::new()
+                .name("kandel-capture-err".into())
+                .spawn(move || {
+                    read_pipe_lines(err_read.raw(), crate::logs::STREAM_STDERR, &err_sink);
+                    unsafe {
+                        let _ = CloseHandle(err_read.raw());
+                    }
+                })
+                .context("spawning stderr capture thread")?,
+        );
+        unsafe {
+            let _ = CloseHandle(handles.out_write.raw());
+            let _ = CloseHandle(handles.err_write.raw());
+        }
+    }
 
     // Assign to the job before resuming, so children spawned after resume are
     // also captured by the job.
@@ -265,7 +409,100 @@ pub fn spawn_with_job_object(spec: &LaunchSpec) -> Result<ChildProcess> {
         pid: pi.dwProcessId,
         process_handle: pi.hProcess,
         job,
+        capture_threads,
     })
+}
+
+/// Handles the parent owns while a capture child is being launched.
+struct CaptureHandles {
+    out_write: SendHandle,
+    err_write: SendHandle,
+}
+
+/// Closes the parent's copy of the launch handles after `CreateProcessW` has
+/// been attempted. Used on the failure path to avoid leaking handles.
+fn close_parent_handles(handles: &CaptureHandles) {
+    unsafe {
+        let _ = CloseHandle(handles.out_write.raw());
+        let _ = CloseHandle(handles.err_write.raw());
+    }
+}
+
+/// Creates an anonymous pipe whose read end is private to the parent.
+///
+/// Both ends are created inheritable (required for `STARTF_USESTDHANDLES`), then
+/// the read end is marked non-inheritable so only the child's write end leaks
+/// into the child.
+fn create_capture_pipe() -> Result<(HANDLE, HANDLE)> {
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: true.into(),
+    };
+    let mut read = HANDLE::default();
+    let mut write = HANDLE::default();
+    unsafe { CreatePipe(&mut read, &mut write, Some(&sa), 0) }.context("CreatePipe")?;
+    unsafe { SetHandleInformation(read, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+        .context("clearing inherit on pipe read end")?;
+    Ok((read, write))
+}
+
+/// Drains a pipe until EOF, invoking `sink` once per line.
+fn read_pipe_lines(handle: HANDLE, stream: &'static str, sink: &LineSink) {
+    let mut buf = [0u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let mut read = 0u32;
+        let result = unsafe { ReadFile(handle, Some(&mut buf), Some(&mut read), None) };
+        if let Err(e) = result {
+            // `ERROR_BROKEN_PIPE` (109) is the normal end of a pipe; anything
+            // else is unexpected but still ends the drain.
+            if e.code().0 as u32 & 0xFFFF != 109 {
+                tracing::debug!(component = "capture", stream, error = %e, "pipe read ended");
+            }
+            break;
+        }
+        if read == 0 {
+            break;
+        }
+        pending.extend_from_slice(&buf[..read as usize]);
+        flush_complete_lines(&mut pending, stream, sink);
+    }
+    // Flush a trailing line that had no newline.
+    if !pending.is_empty() {
+        let text = String::from_utf8_lossy(&pending)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        if !text.is_empty() {
+            sink(stream, &text);
+        }
+    }
+}
+
+/// Emits every complete (newline-terminated) line currently in `pending`,
+/// leaving any trailing partial line in place. A run with no newline longer
+/// than [`MAX_CAPTURE_LINE`] is flushed as a line of its own.
+fn flush_complete_lines(pending: &mut Vec<u8>, stream: &str, sink: &LineSink) {
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < pending.len() {
+        if pending[i] == b'\n' {
+            let line = String::from_utf8_lossy(&pending[start..i])
+                .trim_end_matches('\r')
+                .to_string();
+            sink(stream, &line);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if start > 0 {
+        pending.drain(..start);
+    }
+    if pending.len() > MAX_CAPTURE_LINE {
+        let line = String::from_utf8_lossy(pending).to_string();
+        sink(stream, &line);
+        pending.clear();
+    }
 }
 
 /// Converts a path to a NUL-terminated UTF-16 buffer.
@@ -392,6 +629,73 @@ mod tests {
     }
 
     #[test]
+    fn capture_on_runs_a_console_tool_that_rejects_piped_stdin() {
+        // The regression this guards. `timeout.exe` refuses to run without a
+        // console and with a piped stdin (`ERROR: Input redirection is not
+        // supported`), exiting 1. The core is a GUI process with no console, so
+        // the child must be given its own console (`CREATE_NO_WINDOW`) and a
+        // non-pipe stdin. With both, `timeout` runs and exits 0.
+        let spec = LaunchSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), r"C:\Windows\System32\timeout.exe /t 1".into()],
+            cwd: None,
+            hide_window: true,
+            env: Vec::new(),
+            capture_output: true,
+        };
+        let sink: LineSink = Arc::new(|_, _| {});
+        let mut child = spawn_with_job_object(&spec, Some(sink)).expect("spawn");
+        assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
+        child.join_capture();
+        assert_eq!(
+            child.exit_code().unwrap(),
+            Some(0),
+            "timeout must run under capture, not fail on a redirected stdin"
+        );
+    }
+
+    #[test]
+    fn spawn_captures_stdout_and_stderr() {
+        use std::sync::{Arc, Mutex};
+
+        let lines = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let sink_lines = Arc::clone(&lines);
+        let sink: LineSink = Arc::new(move |stream: &str, text: &str| {
+            sink_lines
+                .lock()
+                .unwrap()
+                .push((stream.to_string(), text.to_string()));
+        });
+
+        let spec = LaunchSpec {
+            program: "cmd.exe".into(),
+            args: vec![
+                "/c".into(),
+                "echo out-line & echo err-line 1>&2 & exit 0".into(),
+            ],
+            cwd: None,
+            hide_window: true,
+            env: Vec::new(),
+            capture_output: true,
+        };
+        let mut child = spawn_with_job_object(&spec, Some(sink)).expect("spawn");
+        assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
+        child.join_capture();
+
+        let got = lines.lock().unwrap();
+        assert!(
+            got.iter()
+                .any(|(s, t)| s == crate::logs::STREAM_STDOUT && t.trim() == "out-line"),
+            "stdout line missing: {got:?}"
+        );
+        assert!(
+            got.iter()
+                .any(|(s, t)| s == crate::logs::STREAM_STDERR && t.trim() == "err-line"),
+            "stderr line missing: {got:?}"
+        );
+    }
+
+    #[test]
     fn spawn_injects_custom_environment() {
         // `cmd /c exit %VAR%` returns the value of the injected variable. The
         // child only sees "7" if the override reached it.
@@ -401,8 +705,9 @@ mod tests {
             cwd: None,
             hide_window: true,
             env: vec![("KANDEL_INJECTED".into(), "7".into())],
+            capture_output: false,
         };
-        let child = spawn_with_job_object(&spec).expect("spawn");
+        let child = spawn_with_job_object(&spec, None).expect("spawn");
         assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
         assert_eq!(child.exit_code().unwrap(), Some(7));
     }
@@ -422,8 +727,9 @@ mod tests {
             cwd: None,
             hide_window: true,
             env: vec![("KANDEL_INJECTED".into(), "0".into())],
+            capture_output: false,
         };
-        let child = spawn_with_job_object(&spec).expect("spawn");
+        let child = spawn_with_job_object(&spec, None).expect("spawn");
         assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
         assert_eq!(child.exit_code().unwrap(), Some(0));
     }
@@ -479,8 +785,9 @@ mod tests {
             cwd: None,
             hide_window: true,
             env: Vec::new(),
+            capture_output: false,
         };
-        let child = spawn_with_job_object(&spec).expect("spawn");
+        let child = spawn_with_job_object(&spec, None).expect("spawn");
         assert!(child.pid > 0);
         let exited = child.wait_for_exit(Some(Duration::from_secs(10)));
         assert!(exited, "child should exit on its own");
@@ -496,8 +803,9 @@ mod tests {
             cwd: None,
             hide_window: true,
             env: Vec::new(),
+            capture_output: false,
         };
-        let child = spawn_with_job_object(&spec).expect("spawn");
+        let child = spawn_with_job_object(&spec, None).expect("spawn");
         let pid = child.pid;
         assert!(!child.wait_for_exit(Some(Duration::from_millis(200))));
 
@@ -522,8 +830,9 @@ mod tests {
             cwd: None,
             hide_window: true,
             env: Vec::new(),
+            capture_output: false,
         };
-        let child = spawn_with_job_object(&spec).expect("spawn");
+        let child = spawn_with_job_object(&spec, None).expect("spawn");
         assert_eq!(child.exit_code().unwrap(), None, "still running");
         assert!(child.wait_for_exit(Some(Duration::from_secs(10))));
         assert_eq!(child.exit_code().unwrap(), Some(7));
@@ -537,8 +846,9 @@ mod tests {
             cwd: None,
             hide_window: true,
             env: Vec::new(),
+            capture_output: false,
         };
-        let child = spawn_with_job_object(&spec).expect("spawn");
+        let child = spawn_with_job_object(&spec, None).expect("spawn");
         child.terminate().expect("terminate");
         assert_eq!(child.exit_code().unwrap(), Some(1));
     }

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use kandel_config::App;
 
+use crate::logs::LogStore;
 use crate::monitor::{Monitor, StateCallback};
 use crate::notify::Notifier;
 use crate::reconciler::{decide, Action};
@@ -16,16 +17,30 @@ pub struct Supervisor {
     monitors: Mutex<BTreeMap<String, Monitor>>,
     on_state: StateCallback,
     notifier: Arc<Notifier>,
+    /// Restart-surviving output logs, shared with every monitor.
+    logs: Arc<LogStore>,
 }
 
 impl Supervisor {
     /// Creates an empty supervisor reporting state through `on_state`.
-    pub fn new(on_state: StateCallback, notifier: Arc<Notifier>) -> Self {
+    pub fn new(on_state: StateCallback, notifier: Arc<Notifier>, logs: Arc<LogStore>) -> Self {
         Supervisor {
             monitors: Mutex::new(BTreeMap::new()),
             on_state,
             notifier,
+            logs,
         }
+    }
+
+    /// Builds a monitor for `name`, wired to the shared log store.
+    fn make_monitor(&self, name: &str, cfg: &App) -> Monitor {
+        Monitor::new(
+            name.to_string(),
+            cfg.clone(),
+            Arc::clone(&self.on_state),
+            Arc::clone(&self.notifier),
+            Arc::clone(&self.logs),
+        )
     }
 
     /// Reconciles the running monitors to match `desired`.
@@ -54,11 +69,7 @@ impl Supervisor {
                         }
                         Action::Start => {
                             existing.stop();
-                            let monitor = Monitor::new(
-                                desired_cfg.clone(),
-                                Arc::clone(&self.on_state),
-                                Arc::clone(&self.notifier),
-                            );
+                            let monitor = self.make_monitor(name, desired_cfg);
                             monitor.start();
                             monitors.insert(name.clone(), monitor);
                         }
@@ -66,11 +77,7 @@ impl Supervisor {
                             tracing::info!(component = "reconciler", action = "RESTART", app = %name, reason = "identity changed");
                             existing.set_config(desired_cfg.clone());
                             existing.stop();
-                            let monitor = Monitor::new(
-                                desired_cfg.clone(),
-                                Arc::clone(&self.on_state),
-                                Arc::clone(&self.notifier),
-                            );
+                            let monitor = self.make_monitor(name, desired_cfg);
                             monitor.start();
                             monitors.insert(name.clone(), monitor);
                         }
@@ -93,6 +100,7 @@ impl Supervisor {
             if let Some(monitor) = monitors.remove(&name) {
                 tracing::info!(component = "reconciler", action = "STOP", app = %name, reason = "removed from config");
                 monitor.stop();
+                self.logs.remove(&name);
                 let mut status = monitor.status();
                 status.state = AppState::Removed;
                 (self.on_state)(status);
@@ -103,20 +111,12 @@ impl Supervisor {
     fn add_entry(&self, monitors: &mut BTreeMap<String, Monitor>, name: &str, cfg: &App) {
         if cfg.enabled {
             tracing::info!(component = "reconciler", action = "START", app = %name, reason = "new entry");
-            let monitor = Monitor::new(
-                cfg.clone(),
-                Arc::clone(&self.on_state),
-                Arc::clone(&self.notifier),
-            );
+            let monitor = self.make_monitor(name, cfg);
             monitor.start();
             monitors.insert(name.to_string(), monitor);
         } else {
             tracing::info!(component = "reconciler", action = "TRACK", app = %name, reason = "new entry, disabled");
-            let monitor = Monitor::new(
-                cfg.clone(),
-                Arc::clone(&self.on_state),
-                Arc::clone(&self.notifier),
-            );
+            let monitor = self.make_monitor(name, cfg);
             (self.on_state)(monitor.status());
             monitors.insert(name.to_string(), monitor);
         }
@@ -174,7 +174,8 @@ mod tests {
     #[test]
     fn adding_disabled_entry_tracks_without_running() {
         let (cb, rx) = collecting_callback();
-        let supervisor = Supervisor::new(cb, Arc::new(Notifier::new()));
+        let supervisor =
+            Supervisor::new(cb, Arc::new(Notifier::new()), Arc::new(LogStore::default()));
 
         let mut desired = BTreeMap::new();
         desired.insert("paused".to_string(), disabled_app("paused"));
@@ -189,7 +190,8 @@ mod tests {
     #[test]
     fn removing_entry_emits_removed_state() {
         let (cb, rx) = collecting_callback();
-        let supervisor = Supervisor::new(cb, Arc::new(Notifier::new()));
+        let supervisor =
+            Supervisor::new(cb, Arc::new(Notifier::new()), Arc::new(LogStore::default()));
 
         let mut desired = BTreeMap::new();
         desired.insert("paused".to_string(), disabled_app("paused"));
@@ -217,7 +219,8 @@ mod tests {
     #[test]
     fn stop_all_clears_monitors() {
         let (cb, _rx) = collecting_callback();
-        let supervisor = Supervisor::new(cb, Arc::new(Notifier::new()));
+        let supervisor =
+            Supervisor::new(cb, Arc::new(Notifier::new()), Arc::new(LogStore::default()));
         let mut desired = BTreeMap::new();
         desired.insert("paused".to_string(), disabled_app("paused"));
         supervisor.reconcile(desired);

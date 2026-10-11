@@ -20,6 +20,18 @@ pub fn to_wide_null(s: &str) -> Vec<u16> {
 #[derive(Debug, Clone, Copy)]
 pub struct SendHandle(pub HANDLE);
 
+impl SendHandle {
+    /// Returns the wrapped handle.
+    ///
+    /// Prefer this over the `.0` field inside a `move` closure: Rust 2021
+    /// captures disjoint fields, so `handle.0` would capture the raw
+    /// non-`Send` pointer and fail the thread bound, whereas `handle.raw()`
+    /// captures the whole `SendHandle`.
+    pub fn raw(self) -> HANDLE {
+        self.0
+    }
+}
+
 // SAFETY: kernel object handles are valid across threads within a process.
 unsafe impl Send for SendHandle {}
 // SAFETY: see above.

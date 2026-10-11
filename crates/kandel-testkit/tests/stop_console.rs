@@ -54,8 +54,9 @@ fn ctrl_break_stops_a_console_process_gracefully() {
         cwd: None,
         hide_window: true,
         env: Vec::new(),
+        capture_output: false,
     };
-    let child = spawn_with_job_object(&spec).expect("spawning the console fixture");
+    let child = spawn_with_job_object(&spec, None).expect("spawning the console fixture");
 
     assert!(
         wait_for_file(&ready, Duration::from_secs(10)),

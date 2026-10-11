@@ -13,26 +13,32 @@ use anyhow::{Context, Result};
 
 use kandel_config::{expand_env_with_pid, App};
 
+use crate::logs::LogStore;
 use crate::notify::Notifier;
 use crate::reconciler as decision;
 use crate::status::{AppState, MonitorStatus};
-use crate::win::process::{self, ChildProcess, LaunchSpec};
+use crate::win::process::{self, ChildProcess, LaunchSpec, LineSink};
 use crate::win::{console, window};
 
 /// Callback invoked whenever a monitor's state changes.
 pub type StateCallback = Arc<dyn Fn(MonitorStatus) + Send + Sync>;
 
 /// Shared state between a [`Monitor`] handle and its thread.
-struct MonitorShared {
+struct MonitorInner {
+    /// The app's config-table key: the identity used for its supervised state.
+    name: String,
     config: Mutex<App>,
     state: Mutex<MonitorStatus>,
     stop: AtomicBool,
     on_state: StateCallback,
     /// Used to tell the user when an app exhausts its retries.
     notifier: Arc<Notifier>,
+    /// Restart-surviving output logs, owned by the supervisor. Recording a
+    /// line here also forwards it to the UI (via the store's sink).
+    logs: Arc<LogStore>,
 }
 
-impl MonitorShared {
+impl MonitorInner {
     fn snapshot_config(&self) -> App {
         self.config.lock().unwrap().clone()
     }
@@ -56,13 +62,23 @@ impl MonitorShared {
 
 /// Manages the lifecycle of a single monitored process.
 pub struct Monitor {
-    shared: Arc<MonitorShared>,
+    inner: Arc<MonitorInner>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Monitor {
     /// Creates a monitor for `cfg` that reports state changes via `on_state`.
-    pub fn new(cfg: App, on_state: StateCallback, notifier: Arc<Notifier>) -> Self {
+    ///
+    /// `name` is the config-table key (the identity used for logs and state);
+    /// `logs` is the restart-surviving per-app log store, whose sink forwards
+    /// captured output to the UI.
+    pub fn new(
+        name: String,
+        cfg: App,
+        on_state: StateCallback,
+        notifier: Arc<Notifier>,
+        logs: Arc<LogStore>,
+    ) -> Self {
         let status = MonitorStatus {
             name: cfg.name.clone(),
             state: AppState::Stopped,
@@ -73,12 +89,14 @@ impl Monitor {
             restart_count: 0,
         };
         Monitor {
-            shared: Arc::new(MonitorShared {
+            inner: Arc::new(MonitorInner {
+                name,
                 config: Mutex::new(cfg),
                 state: Mutex::new(status),
                 stop: AtomicBool::new(false),
                 on_state,
                 notifier,
+                logs,
             }),
             join: Mutex::new(None),
         }
@@ -90,11 +108,11 @@ impl Monitor {
         if join.is_some() {
             return;
         }
-        self.shared.stop.store(false, Ordering::SeqCst);
-        let shared = Arc::clone(&self.shared);
+        self.inner.stop.store(false, Ordering::SeqCst);
+        let inner = Arc::clone(&self.inner);
         let handle = thread::Builder::new()
             .name("kandel-monitor".into())
-            .spawn(move || monitor_loop(shared))
+            .spawn(move || monitor_loop(inner))
             .expect("spawning monitor thread");
         *join = Some(handle);
     }
@@ -105,7 +123,7 @@ impl Monitor {
     pub fn stop(&self) {
         let handle = self.join.lock().unwrap().take();
         if let Some(handle) = handle {
-            self.shared.stop.store(true, Ordering::SeqCst);
+            self.inner.stop.store(true, Ordering::SeqCst);
             let _ = handle.join();
         }
     }
@@ -113,12 +131,12 @@ impl Monitor {
     /// Replaces the monitor's config (used before stopping so that state
     /// notifications during shutdown reflect the new config).
     pub fn set_config(&self, cfg: App) {
-        *self.shared.config.lock().unwrap() = cfg;
+        *self.inner.config.lock().unwrap() = cfg;
     }
 
     /// Hot-reloads the monitoring parameters without restarting the process.
     pub fn update_monitoring_params(&self, cfg: App) {
-        let mut current = self.shared.config.lock().unwrap();
+        let mut current = self.inner.config.lock().unwrap();
         current.restart_delay_sec = cfg.restart_delay_sec;
         current.healthy_timeout_sec = cfg.healthy_timeout_sec;
         current.max_retries = cfg.max_retries;
@@ -129,17 +147,17 @@ impl Monitor {
 
     /// Returns a snapshot of the monitor's current config.
     pub fn config(&self) -> App {
-        self.shared.snapshot_config()
+        self.inner.snapshot_config()
     }
 
     /// Returns a snapshot of the monitor's current status.
     pub fn status(&self) -> MonitorStatus {
-        self.shared.state.lock().unwrap().clone()
+        self.inner.state.lock().unwrap().clone()
     }
 }
 
 /// The monitor thread body: a restart loop around a single process.
-fn monitor_loop(shared: Arc<MonitorShared>) {
+fn monitor_loop(shared: Arc<MonitorInner>) {
     let mut restart_count: i64 = 0;
 
     loop {
@@ -149,12 +167,23 @@ fn monitor_loop(shared: Arc<MonitorShared>) {
         }
 
         let cfg = shared.snapshot_config();
+        // Capture (and therefore logging) is per-entry. When off, the process is
+        // launched with its handles untouched and nothing is logged.
+        let capture = cfg.capture_output;
         shared.emit(AppState::Starting, 0, restart_count);
         let start_time = Instant::now();
 
         let spec = match LaunchSpec::from_app(&cfg) {
             Ok(spec) => spec,
             Err(e) => {
+                if capture {
+                    shared.logs.record_started(&shared.name);
+                    shared.logs.record_line(
+                        &shared.name,
+                        crate::logs::STREAM_STDERR,
+                        e.to_string(),
+                    );
+                }
                 if handle_start_failure(&shared, &cfg, &mut restart_count, &e) {
                     return;
                 }
@@ -162,9 +191,27 @@ fn monitor_loop(shared: Arc<MonitorShared>) {
             }
         };
 
-        let child = match process::spawn_with_job_object(&spec) {
+        // Begin a new log session, preserving everything captured before. The
+        // marker opens each restart's section, and history is never cleared.
+        if capture {
+            shared.logs.record_started(&shared.name);
+        }
+        let name = shared.name.clone();
+        let logs = Arc::clone(&shared.logs);
+        let sink: LineSink = Arc::new(move |stream_name: &str, text: &str| {
+            logs.record_line(&name, stream_name, text.to_string());
+        });
+
+        let mut child = match process::spawn_with_job_object(&spec, Some(sink)) {
             Ok(child) => child,
             Err(e) => {
+                if capture {
+                    shared.logs.record_line(
+                        &shared.name,
+                        crate::logs::STREAM_STDERR,
+                        e.to_string(),
+                    );
+                }
                 if handle_start_failure(&shared, &cfg, &mut restart_count, &e) {
                     return;
                 }
@@ -193,9 +240,14 @@ fn monitor_loop(shared: Arc<MonitorShared>) {
                     "stop strategy failed, continuing cleanup"
                 );
             }
+            child.join_capture();
             shared.emit(AppState::Stopped, 0, restart_count);
             return;
         }
+
+        // Drained before any restart, so this session's output is complete and
+        // ordered ahead of the next start marker.
+        child.join_capture();
 
         // Process exited on its own.
         let duration = start_time.elapsed();
@@ -240,7 +292,7 @@ fn monitor_loop(shared: Arc<MonitorShared>) {
 ///
 /// Returns `true` when the monitor thread should exit.
 fn handle_start_failure(
-    shared: &MonitorShared,
+    shared: &MonitorInner,
     cfg: &App,
     restart_count: &mut i64,
     err: &anyhow::Error,
@@ -436,7 +488,13 @@ mod tests {
             ..App::default()
         };
 
-        let monitor = Monitor::new(cfg, on_state, Arc::new(Notifier::new()));
+        let monitor = Monitor::new(
+            "sleeper".into(),
+            cfg,
+            on_state,
+            Arc::new(Notifier::new()),
+            Arc::new(LogStore::default()),
+        );
         monitor.start();
 
         // Wait until the process reports Running.
@@ -479,7 +537,13 @@ mod tests {
             ..App::default()
         };
 
-        let monitor = Monitor::new(cfg, on_state, Arc::new(Notifier::new()));
+        let monitor = Monitor::new(
+            "crashy".into(),
+            cfg,
+            on_state,
+            Arc::new(Notifier::new()),
+            Arc::new(LogStore::default()),
+        );
         monitor.start();
 
         let mut saw_failed = false;
@@ -496,6 +560,62 @@ mod tests {
         }
         assert!(saw_failed, "expected the app to be marked Failed");
         // A terminal monitor has nothing to stop; stop() is a no-op.
+        monitor.stop();
+    }
+
+    #[test]
+    fn monitor_log_survives_restarts() {
+        use std::sync::mpsc::channel;
+
+        let (tx, rx) = channel();
+        let on_state: StateCallback = Arc::new(move |status| {
+            let _ = tx.send(status);
+        });
+
+        // A process that prints one line then exits: the restart loop runs it
+        // twice, and the second session must append to the first.
+        let cfg = App {
+            name: "talky".into(),
+            command: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo hello-session".into()],
+            hide_window: true,
+            restart_delay_sec: 0,
+            max_retries: 1,
+            capture_output: true,
+            ..App::default()
+        };
+
+        let logs = Arc::new(LogStore::default());
+        let monitor = Monitor::new(
+            "talky".into(),
+            cfg,
+            on_state,
+            Arc::new(Notifier::new()),
+            Arc::clone(&logs),
+        );
+        monitor.start();
+
+        // Wait until the app gives up (max_retries = 1 means two launches).
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(3)) {
+                Ok(status) if status.state == AppState::Failed => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        let events = logs.events("talky");
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e, crate::logs::LogEvent::Started { .. }))
+            .count();
+        let lines = events
+            .iter()
+            .filter(|e| matches!(e, crate::logs::LogEvent::Line { .. }))
+            .count();
+        assert_eq!(starts, 2, "expected two session markers: {events:?}");
+        assert!(lines >= 2, "expected output from both sessions: {events:?}");
         monitor.stop();
     }
 }

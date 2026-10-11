@@ -30,6 +30,8 @@ export interface AppConfig {
   hideWindow: boolean;
   maxRetries: number;
   stopTimeoutSec: number;
+  /** Whether the process's stdout/stderr are captured into its log. */
+  captureOutput: boolean;
 }
 
 /** A runtime status update pushed by the core over IPC. */
@@ -59,5 +61,11 @@ export function makeEmptyForm(): AppConfig {
     hideWindow: false,
     maxRetries: -1,
     stopTimeoutSec: 5,
+    captureOutput: true,
   };
 }
+
+/** A single log event pushed by the core over IPC. */
+export type LogEvent =
+  | { type: "started"; ts: number }
+  | { type: "line"; ts: number; stream: string; text: string };

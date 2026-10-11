@@ -1,5 +1,6 @@
-//! Reads line-delimited JSON monitor status from stdin (the core process) and
-//! forwards each update to the frontend as an `app-state-update` event.
+//! Reads line-delimited JSON events from stdin (the core process) and forwards
+//! each to the frontend: lifecycle statuses as `app-state-update` events and
+//! captured log events as `app-log-update` events.
 //!
 //! This listener is only active in **IPC mode**, which the core enables when it
 //! launches the UI as its child with a piped stdin. In that mode, EOF on stdin
@@ -8,16 +9,15 @@
 //! stdin is left alone — otherwise a non-piped stdin would report EOF
 //! immediately and close the window.
 //!
-//! # Why statuses are cached
+//! # Why messages are cached
 //!
-//! The core starts writing statuses the moment it launches the UI, but the
-//! frontend can only subscribe once the webview has mounted — later. Without a
-//! cache, every status written in that window is emitted to zero listeners and
-//! lost, leaving entries stuck on whatever the config seeded (observed as
-//! "Starting"). The cache holds the latest status per app so the frontend can
-//! fetch a snapshot on mount; live events then keep it current. Because the
-//! cache only ever moves forward, applying a snapshot after subscribing can
-//! never regress a newer value that already arrived by event.
+//! The core starts writing the moment it launches the UI, but the frontend can
+//! only subscribe once the webview has mounted — later. Without a cache, every
+//! message written in that window is emitted to zero listeners and lost, leaving
+//! entries stuck on whatever the config seeded (observed as "Starting") and logs
+//! empty. The caches hold the latest status per app and the event backlog per
+//! app so the frontend can fetch a snapshot on mount; live events then keep it
+//! current.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -27,54 +27,88 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Event name emitted to the frontend for each status update.
 pub const STATE_EVENT: &str = "app-state-update";
+/// Event name emitted to the frontend for each captured log event.
+pub const LOG_EVENT: &str = "app-log-update";
 
 /// Command-line flag the core passes to the UI to enable IPC mode.
 pub const IPC_FLAG: &str = "--ipc";
 
-/// The latest status line per app name.
+/// The latest status line per app name, plus each app's log backlog.
 ///
-/// Keyed by app name so repeated updates for one app replace rather than
-/// accumulate. Stores the raw JSON line the core sent, so the snapshot the
-/// frontend fetches is byte-identical to an event payload.
+/// Statuses are keyed by app name so repeated updates for one app replace rather
+/// than accumulate; the raw JSON line the core sent is stored so the snapshot the
+/// frontend fetches is byte-identical to an event payload. Log events accumulate
+/// in order, and are trimmed to a bounded backlog.
 #[derive(Default)]
-pub struct StatusCache(Mutex<HashMap<String, String>>);
+pub struct StatusCache {
+    statuses: Mutex<HashMap<String, String>>,
+    logs: Mutex<HashMap<String, Vec<String>>>,
+}
+
+/// Matches the core's per-app log cap, so the two ends agree on backlog size.
+const LOG_BACKLOG_CAP: usize = 2000;
 
 impl StatusCache {
-    /// Records the latest status line for the app it names.
+    /// Routes a decoded event line into the status or log cache.
     ///
     /// A line that is not valid JSON, or has no `name`, is still forwarded to
     /// the frontend (which ignores it) but not cached, since there is nothing
     /// to key it on.
     pub fn record(&self, line: &str) {
-        let Some(name) = status_name(line) else {
-            return;
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => return,
         };
-        if let Ok(mut cache) = self.0.lock() {
-            cache.insert(name, line.to_string());
+        let kind = value
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("status");
+        if kind == "logs" {
+            let Some(name) = value.get("name").and_then(|n| n.as_str()) else {
+                return;
+            };
+            if let Ok(mut logs) = self.logs.lock() {
+                let entry = logs.entry(name.to_string()).or_default();
+                entry.push(line.to_string());
+                while entry.len() > LOG_BACKLOG_CAP {
+                    entry.remove(0);
+                }
+            }
+        } else if let Some(name) = value.get("name").and_then(|n| n.as_str()) {
+            if let Ok(mut statuses) = self.statuses.lock() {
+                statuses.insert(name.to_string(), line.to_string());
+            }
         }
     }
 
     /// Returns every cached status line. Order is unspecified; the frontend
     /// sorts by name for display.
     pub fn snapshot(&self) -> Vec<String> {
-        self.0
+        self.statuses
             .lock()
             .map(|cache| cache.values().cloned().collect())
             .unwrap_or_default()
     }
 
-    /// Removes the cached status for `name` (used when an entry is deleted).
+    /// Returns the buffered log lines for `name`, oldest first.
+    pub fn log_snapshot(&self, name: &str) -> Vec<String> {
+        self.logs
+            .lock()
+            .ok()
+            .and_then(|logs| logs.get(name).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Removes the cached status and log for `name` (used when an entry is
+    /// deleted).
     pub fn remove(&self, name: &str) {
-        if let Ok(mut cache) = self.0.lock() {
+        if let Ok(mut cache) = self.statuses.lock() {
             cache.remove(name);
         }
+        if let Ok(mut logs) = self.logs.lock() {
+            logs.remove(name);
+        }
     }
-}
-
-/// Extracts the `name` field from a status line, if present.
-fn status_name(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    value.get("name")?.as_str().map(str::to_string)
 }
 
 /// Splits `IPC_FLAG` out of an argument iterator.
@@ -116,7 +150,15 @@ pub fn spawn_stdin_listener(app: AppHandle) {
                         if let Some(cache) = app.try_state::<StatusCache>() {
                             cache.record(&line);
                         }
-                        let _ = app.emit(STATE_EVENT, line);
+                        let is_log = serde_json::from_str::<serde_json::Value>(&line)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("kind").and_then(|k| k.as_str().map(str::to_string))
+                            })
+                            .map(|k| k == "logs")
+                            .unwrap_or(false);
+                        let event = if is_log { LOG_EVENT } else { STATE_EVENT };
+                        let _ = app.emit(event, line);
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -138,14 +180,22 @@ pub fn get_initial_statuses(cache: State<'_, StatusCache>) -> Vec<String> {
     cache.snapshot()
 }
 
+/// Returns the buffered log lines for `name`, for the frontend to apply when a
+/// log panel is opened.
+#[tauri::command]
+pub fn get_app_logs(cache: State<'_, StatusCache>, name: String) -> Vec<String> {
+    cache.log_snapshot(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn state_event_name_is_stable() {
-        // The frontend depends on this exact event name.
+        // The frontend depends on these exact event names.
         assert_eq!(STATE_EVENT, "app-state-update");
+        assert_eq!(LOG_EVENT, "app-log-update");
     }
 
     #[test]
@@ -178,17 +228,28 @@ mod tests {
     }
 
     #[test]
-    fn status_name_reads_the_name_field() {
-        assert_eq!(
-            status_name(r#"{"name":"api","state":"Running"}"#).as_deref(),
-            Some("api")
-        );
+    fn cache_keys_statuses_and_logs_separately() {
+        let cache = StatusCache::default();
+        cache.record(r#"{"kind":"status","name":"api","state":"Running"}"#);
+        cache.record(r#"{"kind":"logs","name":"api","event":{"type":"line","text":"hi"}}"#);
+
+        assert_eq!(cache.snapshot().len(), 1);
+        assert!(cache.snapshot()[0].contains("Running"));
+
+        let logs = cache.log_snapshot("api");
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("hi"));
     }
 
     #[test]
-    fn status_name_is_none_without_a_name() {
-        assert_eq!(status_name(r#"{"state":"Running"}"#), None);
-        assert_eq!(status_name("not json"), None);
+    fn cache_accumulates_log_lines_in_order() {
+        let cache = StatusCache::default();
+        cache.record(r#"{"kind":"logs","name":"a","event":{"type":"line","text":"one"}}"#);
+        cache.record(r#"{"kind":"logs","name":"a","event":{"type":"line","text":"two"}}"#);
+        let logs = cache.log_snapshot("a");
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].contains("one"));
+        assert!(logs[1].contains("two"));
     }
 
     #[test]
@@ -210,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_ignores_lines_it_cannot_key() {
+    fn cache_ignores_lines_without_a_name() {
         let cache = StatusCache::default();
         cache.record("not json");
         cache.record(r#"{"state":"Running"}"#);
@@ -218,13 +279,14 @@ mod tests {
     }
 
     #[test]
-    fn cache_remove_drops_one_entry() {
+    fn cache_remove_drops_a_status_and_its_log() {
         let cache = StatusCache::default();
-        cache.record(r#"{"name":"api","state":"Running"}"#);
-        cache.record(r#"{"name":"web","state":"Running"}"#);
+        cache.record(r#"{"kind":"status","name":"api","state":"Running"}"#);
+        cache.record(r#"{"kind":"logs","name":"api","event":{"type":"line","text":"x"}}"#);
+        cache.record(r#"{"kind":"status","name":"web","state":"Running"}"#);
         cache.remove("api");
-        let snap = cache.snapshot();
-        assert_eq!(snap.len(), 1);
-        assert!(snap[0].contains("web"));
+        assert_eq!(cache.snapshot().len(), 1);
+        assert!(cache.snapshot()[0].contains("web"));
+        assert!(cache.log_snapshot("api").is_empty());
     }
 }

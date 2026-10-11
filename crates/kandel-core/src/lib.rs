@@ -5,6 +5,7 @@
 //! `#[cfg(windows)]`.
 
 pub mod ipc;
+pub mod logs;
 pub mod reconciler;
 pub mod status;
 
@@ -37,4 +38,6 @@ pub mod app;
 #[cfg(windows)]
 pub mod ipc_server;
 
+pub use ipc::CoreEvent;
+pub use logs::{LogEvent, LogStore};
 pub use status::{AppState, MonitorStatus};

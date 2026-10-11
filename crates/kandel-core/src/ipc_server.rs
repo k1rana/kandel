@@ -8,13 +8,14 @@ use anyhow::{Context, Result};
 
 use kandel_config::{LogFormat, RuntimeFlags};
 
-use crate::ipc::StatusWriter;
+use crate::ipc::{CoreEvent, EventWriter};
+use crate::logs::LogEvent;
 use crate::status::MonitorStatus;
 
-/// A running UI process and its status writer.
+/// A running UI process and its event writer.
 struct UiProcess {
     child: Child,
-    writer: StatusWriter<std::process::ChildStdin>,
+    writer: EventWriter<std::process::ChildStdin>,
 }
 
 /// Launches and tracks the single UI process.
@@ -37,12 +38,18 @@ impl UiManager {
         }
     }
 
-    /// Launches the UI if it is not already running, then sends `initial`.
+    /// Launches the UI if it is not already running, then sends `initial`
+    /// statuses and the current per-app log backlog.
     ///
     /// The UI executable is expected next to the core binary, named
     /// `kandel-ui.exe`. Passing `-f`, `-log-file`, and `-log-format` keeps the
     /// two processes consistent.
-    pub fn show(&self, flags: &RuntimeFlags, initial: &[MonitorStatus]) -> Result<()> {
+    pub fn show(
+        &self,
+        flags: &RuntimeFlags,
+        initial: &[MonitorStatus],
+        logs: &[(String, Vec<LogEvent>)],
+    ) -> Result<()> {
         let mut guard = self.inner.lock().unwrap();
 
         // Reap a UI that has already exited.
@@ -80,13 +87,21 @@ impl UiManager {
             let stdin = child.stdin.take().context("taking UI stdin")?;
             *guard = Some(UiProcess {
                 child,
-                writer: StatusWriter::new(stdin),
+                writer: EventWriter::new(stdin),
             });
         }
 
         if let Some(ui) = guard.as_mut() {
             for status in initial {
-                let _ = ui.writer.send(status);
+                let _ = ui.writer.send(&CoreEvent::Status(status.clone()));
+            }
+            for (name, events) in logs {
+                for event in events {
+                    let _ = ui.writer.send(&CoreEvent::Logs {
+                        name: name.clone(),
+                        event: event.clone(),
+                    });
+                }
             }
         }
 
@@ -95,9 +110,22 @@ impl UiManager {
 
     /// Sends a status update to the UI, ignoring the case where no UI is running.
     pub fn send(&self, status: &MonitorStatus) {
+        self.send_event(&CoreEvent::Status(status.clone()));
+    }
+
+    /// Sends a captured log event for `name`, ignoring the case where no UI is
+    /// running.
+    pub fn send_log(&self, name: &str, event: &LogEvent) {
+        self.send_event(&CoreEvent::Logs {
+            name: name.to_string(),
+            event: event.clone(),
+        });
+    }
+
+    fn send_event(&self, event: &CoreEvent) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(ui) = guard.as_mut() {
-            if ui.writer.send(status).is_err() {
+            if ui.writer.send(event).is_err() {
                 // Writing to a closed pipe means the UI exited; drop it.
                 *guard = None;
             }
@@ -166,6 +194,7 @@ mod tests {
             args: vec![],
             restart_count: 0,
         });
+        manager.send_log("a", &crate::logs::LogEvent::Started { ts: 1 });
         assert!(!manager.is_running());
     }
 

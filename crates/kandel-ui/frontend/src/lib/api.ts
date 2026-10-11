@@ -8,6 +8,9 @@ import type { AboutInfo, AppConfig, AppStateInfo } from "./types";
 /** Event name the core's status updates are forwarded under. */
 export const STATE_EVENT = "app-state-update";
 
+/** Event name the core's captured log events are forwarded under. */
+export const LOG_EVENT = "app-log-update";
+
 /** Returns the metadata shown in the About dialog. */
 export function getAboutInfo(): Promise<AboutInfo> {
   return invoke<AboutInfo>("get_about_info");
@@ -54,6 +57,36 @@ export async function onStateUpdate(
       console.error("Failed to parse state update:", e);
     }
   });
+}
+
+/** A captured log event together with the app it belongs to. */
+export interface AppLogUpdate {
+  name: string;
+  event: import("./types").LogEvent;
+}
+
+/** Subscribes to core log events pushed over IPC. */
+export async function onLogUpdate(
+  handler: (update: AppLogUpdate) => void,
+): Promise<UnlistenFn> {
+  return listen<string>(LOG_EVENT, (event) => {
+    try {
+      handler(JSON.parse(event.payload) as AppLogUpdate);
+    } catch (e) {
+      console.error("Failed to parse log update:", e);
+    }
+  });
+}
+
+/**
+ * Returns the log events the core already sent for `name`.
+ *
+ * The core replays an app's backlog whenever the UI is launched, but a log
+ * panel opened later needs the same history; this fetches what the UI's stdin
+ * listener has buffered.
+ */
+export function getAppLogs(name: string): Promise<string[]> {
+  return invoke<string[]>("get_app_logs", { name });
 }
 
 /**

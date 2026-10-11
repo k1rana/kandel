@@ -65,6 +65,8 @@ pub struct AppConfig {
     pub max_retries: i64,
     /// Graceful stop timeout in seconds.
     pub stop_timeout_sec: i64,
+    /// Whether the process's stdout/stderr are captured into its log.
+    pub capture_output: bool,
 }
 
 impl AppConfig {
@@ -84,6 +86,7 @@ impl AppConfig {
             hide_window: app.hide_window,
             max_retries: app.max_retries,
             stop_timeout_sec: app.stop_timeout_sec,
+            capture_output: app.capture_output,
         }
     }
 
@@ -105,6 +108,7 @@ impl AppConfig {
             restart_delay_sec: self.restart_delay_sec,
             healthy_timeout_sec: self.healthy_timeout_sec,
             hide_window: self.hide_window,
+            capture_output: self.capture_output,
             max_retries: self.max_retries,
             stop_timeout_sec: self.stop_timeout_sec,
         })
@@ -331,6 +335,7 @@ mod tests {
             hide_window: true,
             max_retries: 5,
             stop_timeout_sec: 10,
+            capture_output: true,
         };
 
         let app = dto.to_app().unwrap();
@@ -369,6 +374,7 @@ mod tests {
             hide_window: false,
             max_retries: -1,
             stop_timeout_sec: 5,
+            capture_output: true,
         };
         assert!(dto.to_app().is_err());
     }

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use kandel_config::{format_args, parse_args, App, ConfigError, EnvVar, DEFAULT_CONFIG};
+use kandel_config::{
+    format_args, parse_args, save_config_preserving, App, ConfigError, EnvVar, DEFAULT_CONFIG,
+};
 
 /// Shared UI state: the resolved config path.
 pub struct UiState {
@@ -212,7 +214,7 @@ pub fn update_app_config(
     app.name = cfg.name.clone();
     apps.insert(cfg.name.clone(), app);
 
-    kandel_config::save_config(&path, &apps).map_err(|e| format!("saving config: {e}"))
+    save_config_preserving(&path, &apps).map_err(|e| format!("saving config: {e}"))
 }
 
 /// Removes the entry named `name` from `config.toml`.
@@ -225,7 +227,7 @@ pub fn delete_app_config(state: State<'_, UiState>, name: String) -> Result<(), 
         return Err(format!("app {name:?} not found in config"));
     }
 
-    kandel_config::save_config(&path, &apps).map_err(|e| format!("saving config: {e}"))
+    save_config_preserving(&path, &apps).map_err(|e| format!("saving config: {e}"))
 }
 
 /// Returns the executable/script extensions accepted by this Windows environment.

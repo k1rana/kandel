@@ -80,7 +80,12 @@ pub struct EnvVar {
 }
 
 /// Configuration for a single managed application.
+///
+/// Unknown keys are rejected rather than ignored: a misspelled field
+/// (`restart_delay` for `restart_delay_sec`) would otherwise be silently dropped
+/// on the next save, deleting what the user wrote without telling them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct App {
     /// Identifier shown in the UI. Never serialized into the entry body; the
     /// TOML table name is used instead.
@@ -414,9 +419,95 @@ pub fn apps_to_toml(apps: &BTreeMap<String, App>) -> Result<String, ConfigError>
 
 /// Writes `apps` to `path` using an atomic write (temp file -> sync -> rename)
 /// to prevent partial writes and spurious watcher events.
+///
+/// This regenerates the whole document from the model, so any comments or
+/// hand-formatting in an existing file are discarded. Use
+/// [`save_config_preserving`] to keep them.
 pub fn save_config(path: &Path, apps: &BTreeMap<String, App>) -> Result<(), ConfigError> {
     let body = apps_to_toml(apps)?;
+    write_atomic(path, &body)
+}
 
+/// Writes `apps` to `path`, preserving the existing file's comments and
+/// formatting for every part that did not change.
+///
+/// An entry whose parsed value is identical to the one on disk is left byte for
+/// byte, so editing one app never disturbs another's comments, key order, or
+/// quoting. A changed entry gets its body rewritten in the canonical form, but
+/// its table header comment (and any blank lines above it) is kept. Entries
+/// removed from `apps` are deleted.
+///
+/// Comments placed *inside* a changed entry's body are the one thing not kept:
+/// writing a field means regenerating that entry's scalar fields. Comments above
+/// the entry, on other entries, and at the top or bottom of the file all
+/// survive. For the exact behavior, see the `save_preserving_*` tests.
+///
+/// When the existing file is absent or cannot be parsed, there is nothing to
+/// preserve and this falls back to a canonical rewrite via [`save_config`].
+pub fn save_config_preserving(
+    path: &Path,
+    apps: &BTreeMap<String, App>,
+) -> Result<(), ConfigError> {
+    let existing_text = std::fs::read_to_string(path).unwrap_or_default();
+    let existing_apps = parse_config(&existing_text).ok();
+    let mut doc: toml_edit::DocumentMut = match existing_text.parse() {
+        Ok(doc) => doc,
+        Err(_) => return save_config(path, apps),
+    };
+
+    // Drop app tables that are no longer configured. Non-table root keys are
+    // left untouched: they are not entries (parse_config would reject them), so
+    // removing them would silently delete data the model does not own.
+    let stale: Vec<String> = doc
+        .iter()
+        .filter(|(name, item)| item.is_table() && !apps.contains_key(*name))
+        .map(|(name, _)| name.to_string())
+        .collect();
+    for name in stale {
+        doc.remove(&name);
+    }
+
+    for (name, app) in apps {
+        let unchanged = existing_apps
+            .as_ref()
+            .and_then(|map| map.get(name))
+            .is_some_and(|current| current == app);
+        if unchanged && doc.contains_key(name) {
+            continue;
+        }
+
+        let table = entry_to_table(app)?;
+        match doc.get_mut(name) {
+            Some(item) if item.is_table() => {
+                // Keep the comment and blank lines that precede the header.
+                let decor = item.as_table().expect("checked is_table").decor().clone();
+                *item = toml_edit::Item::Table(table);
+                *item
+                    .as_table_mut()
+                    .expect("just assigned a table")
+                    .decor_mut() = decor;
+            }
+            _ => {
+                doc.insert(name, toml_edit::Item::Table(table));
+            }
+        }
+    }
+
+    write_atomic(path, &doc.to_string())
+}
+
+/// Serializes a single entry's body (no table header) as a `toml_edit` table.
+fn entry_to_table(app: &App) -> Result<toml_edit::Table, ConfigError> {
+    let body = toml::to_string(&AppToml::from(app))
+        .map_err(|e| ConfigError::Other(format!("marshaling entry to TOML: {e}")))?;
+    let doc: toml_edit::DocumentMut = body
+        .parse()
+        .map_err(|e| ConfigError::Other(format!("reparsing entry TOML: {e}")))?;
+    Ok(doc.into_table())
+}
+
+/// Writes `body` to `path` atomically (temp file -> sync -> rename).
+fn write_atomic(path: &Path, body: &str) -> Result<(), ConfigError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     if !dir.as_os_str().is_empty() {
         std::fs::create_dir_all(dir).map_err(|source| ConfigError::Save {
@@ -1012,6 +1103,99 @@ env = [
     }
 
     #[test]
+    fn save_preserving_keeps_comments_and_untouched_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let a_exe = dir.path().join("a.exe");
+        let b_exe = dir.path().join("b.exe");
+        std::fs::write(&a_exe, b"").unwrap();
+        std::fs::write(&b_exe, b"").unwrap();
+
+        // A hand-written file: a file header, a per-entry comment, a trailing
+        // comment, a non-default field, and a deliberately non-canonical order.
+        let original = format!(
+            "# Kandel configuration\n# keep me\n\n# web service\n[\"web\"]\ncommand = '{}'\n\n# worker\n[\"worker\"]\ncommand = '{}'\nrestart_delay_sec = 7 # wait a bit\n",
+            a_exe.display(),
+            b_exe.display(),
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        // Load, edit only `worker`, save preserving.
+        let mut apps = load_config(&path).unwrap();
+        apps.get_mut("worker").unwrap().max_retries = 3;
+        save_config_preserving(&path, &apps).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+
+        // All comments outside the edited entry's body survive, including the
+        // header comment of the entry that changed.
+        assert!(
+            got.contains("# Kandel configuration"),
+            "file header lost:\n{got}"
+        );
+        assert!(got.contains("# keep me"), "second header line lost:\n{got}");
+        assert!(
+            got.contains("# web service"),
+            "untouched entry comment lost:\n{got}"
+        );
+        assert!(
+            got.contains("# worker"),
+            "edited entry header comment lost:\n{got}"
+        );
+
+        // The edit landed and round-trips.
+        let reloaded = load_config(&path).unwrap();
+        assert_eq!(reloaded["worker"].max_retries, 3);
+        assert_eq!(reloaded["worker"].restart_delay_sec, 7);
+    }
+
+    #[test]
+    fn save_preserving_is_byte_stable_for_a_no_op_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let exe = dir.path().join("app.exe");
+        std::fs::write(&exe, b"").unwrap();
+
+        let original = format!(
+            "# header\n[\"app\"]\ncommand = '{}'\nargs = [\"run\", \"dev\"]\nenabled = false\n",
+            exe.display()
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        let apps = load_config(&path).unwrap();
+        save_config_preserving(&path, &apps).unwrap();
+
+        // Nothing changed, so the file must be untouched byte for byte (this is
+        // what keeps the watcher from seeing a spurious change).
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(got, original);
+    }
+
+    #[test]
+    fn save_preserving_drops_removed_entries_and_keeps_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let a_exe = dir.path().join("a.exe");
+        std::fs::write(&a_exe, b"").unwrap();
+
+        let original = format!(
+            "# keep\n[\"keep\"]\ncommand = '{}'\n\n# gone\n[\"gone\"]\ncommand = '{}'\n",
+            a_exe.display(),
+            a_exe.display(),
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        let mut apps = load_config(&path).unwrap();
+        apps.remove("gone");
+        save_config_preserving(&path, &apps).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(got.contains("[\"keep\"]"), "kept entry lost:\n{got}");
+        assert!(got.contains("# keep"), "kept comment lost:\n{got}");
+        assert!(!got.contains("[\"gone\"]"), "removed entry lingers:\n{got}");
+    }
+
+    #[test]
     fn load_rejects_invalid_toml() {
         assert!(matches!(
             parse_config("this is not = = toml"),
@@ -1023,6 +1207,24 @@ env = [
     fn load_rejects_non_table_entry() {
         let err = parse_config("app = 42").unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { .. }));
+    }
+
+    #[test]
+    fn load_rejects_unknown_field() {
+        // A misspelled field must fail loudly: silently ignoring it would let
+        // the next save drop the key the user wrote.
+        let err =
+            parse_config("[\"app\"]\ncommand = \"cmd.exe\"\nrestart_delay = 3\n").unwrap_err();
+        match err {
+            ConfigError::Invalid { app, message } => {
+                assert_eq!(app, "app");
+                assert!(
+                    message.contains("restart_delay"),
+                    "unhelpful message: {message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]

@@ -51,18 +51,13 @@ The core locates the UI beside itself, so a folder containing only one of the tw
 
 ## Configuration
 
-Applications are managed through `config.toml`, which lives at `%USERPROFILE%\.config\kandel\config.toml` by default. Kandel creates the file with sample content on first launch. Override the path with the `-f <path>` CLI flag.
+Applications are managed through `config.toml`, which lives at `%USERPROFILE%\.config\kandel\config.toml` by default. Kandel creates the file with sample content on first launch. Override the path with the `-f <path>` CLI flag. The file is the single source of truth: both you and the UI write it, and the core reads it.
 
-`config.toml` is the single source of truth. Both the user and the UI write it; the core reads it and never writes it after first-run bootstrap. The two sides exchange only:
+If you edit the file outside the UI, write it in one atomic step: save to a `.tmp` file, then rename it over the original. The UI already saves this way, and a partial or invalid file is ignored with an error dialog rather than applied.
 
-1. **Status updates (core to UI).** The core launches the UI as a child and writes a line-delimited JSON stream of `MonitorStatus` objects to its stdin.
-2. **Config changes (UI to core).** The UI writes `config.toml` atomically; the core picks the change up through a debounced file watcher.
+Comments and formatting survive edits made through the UI. It rewrites only the entry you changed, so comments elsewhere in the file stay; a comment inside that entry's body is the one exception, since its fields are regenerated.
 
-> [!WARNING]
-> Kandel watches this file for real-time changes, so **atomic writes are required** when modifying it with external tools. The built-in UI handles this automatically. From a script, write to a `.tmp` file and perform an atomic rename.
-
-> [!TIP]
-> The TOML file takes arguments as a string array (`args = ["-a", "-b"]`). The management UI accepts them as a single shell-like string (e.g. `-a -b "quoted string"`) and parses them for you.
+The file takes arguments as a string array (`args = ["-a", "-b"]`). The management UI accepts them as a single shell-like string (e.g. `-a -b "quoted string"`) and parses them for you.
 
 ### Example
 
@@ -253,8 +248,8 @@ configured, and the child still inherits the environment.
 
 ## Troubleshooting
 
+- **An edit to `config.toml` did nothing.** Either the file was written non-atomically and the core read a partial file, or a key is misspelled (`restart_delay` for `restart_delay_sec`). Unknown keys are rejected rather than ignored, so both cases fail to parse and the core keeps the previous state. Write to a `.tmp` file and rename it into place, and check the key names.
 - **The core exits right after launch and shows an error dialog.** `config.toml` failed to parse. Fix the TOML and start Kandel again.
-- **An edit to `config.toml` did nothing.** The file was probably written non-atomically and failed to parse, so the core kept the previous state. Write to a `.tmp` file and rename it into place.
 - **A second Kandel will not start.** Only one instance runs per Windows session. Sign out and back in as a different user to run another, or quit the existing one from the tray.
 - **The UI opens but shows no live status.** The UI only receives status when the core launches it with the `--ipc` flag. A UI opened outside the core (for example under `tauri dev`) has no status pipe and runs without live state.
 - **Auto-start did not take effect.** The toggle writes to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` for the current user. Check that key if the entry is missing.

@@ -18,8 +18,8 @@ pub mod flags;
 pub use args::{format_args, parse_args, ParseArgsError};
 pub use config::{
     apps_to_toml, load_config, parse_config, resolve_command_path, resolve_command_path_in,
-    save_config, App, ConfigError, EnvVar, DEFAULT_CAPTURE_OUTPUT, DEFAULT_ENABLED,
-    DEFAULT_MAX_RETRIES, DEFAULT_STOP_TIMEOUT_SEC,
+    save_config, save_config_preserving, App, ConfigError, EnvVar, DEFAULT_CAPTURE_OUTPUT,
+    DEFAULT_ENABLED, DEFAULT_MAX_RETRIES, DEFAULT_STOP_TIMEOUT_SEC,
 };
 pub use expand::{expand, expand_env, expand_env_with_pid, validate_template, ExpandError};
 pub use flags::{default_config_path, LogFormat, RuntimeFlags};

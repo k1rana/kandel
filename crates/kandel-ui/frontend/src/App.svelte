@@ -32,7 +32,6 @@
   import { isWindowMaximized, onWindowResized } from "./lib/window";
   import {
     applyTheme,
-    nextSetting,
     readSetting,
     resolveTheme,
     syncWindowTheme,
@@ -82,8 +81,8 @@
     syncWindowTheme(theme);
   }
 
-  function toggleTheme() {
-    themeSetting = nextSetting(themeSetting);
+  function selectTheme(next: ThemeSetting) {
+    themeSetting = next;
     writeSetting(localStorage, themeSetting);
     applyCurrentTheme();
   }
@@ -525,7 +524,7 @@
 <svelte:window />
 
 <main class="window">
-  <Titlebar {maximized} {tally} onAdd={openCreate} themeSetting={themeSetting} onToggleTheme={toggleTheme} />
+  <Titlebar {maximized} {tally} onAdd={openCreate} themeSetting={themeSetting} {prefersDark} onSelectTheme={selectTheme} />
 
   <div class="body">
     {#if appList.length === 0}

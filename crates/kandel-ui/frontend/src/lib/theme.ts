@@ -8,22 +8,39 @@ export type ThemeSetting = Theme | "system";
 /** The key the setting is persisted under. */
 export const THEME_STORAGE_KEY = "kandel.theme";
 
+/** A pickable theme setting, as listed in the Settings menu. */
+export interface ThemeOption {
+  value: ThemeSetting;
+  /** Menu label. */
+  label: string;
+}
+
+/**
+ * The theme settings, in menu order. `Auto` leads because following the OS is
+ * the default and the least surprising choice for a background utility.
+ */
+export const THEME_OPTIONS: readonly ThemeOption[] = [
+  { value: "system", label: "Auto" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+/**
+ * The menu label for a setting.
+ *
+ * `Auto` names the theme it currently follows — `Auto (Dark)` — so the option
+ * is not opaque while the OS is in charge. The explicit settings show their own
+ * name. Base labels come from {@link THEME_OPTIONS} so the two cannot drift.
+ */
+export function themeLabel(setting: ThemeSetting, prefersDark: boolean): string {
+  const base = THEME_OPTIONS.find((option) => option.value === setting)?.label ?? setting;
+  return setting === "system" ? `${base} (${prefersDark ? "Dark" : "Light"})` : base;
+}
+
 /** Resolves a setting against the current OS preference. */
 export function resolveTheme(setting: ThemeSetting, prefersDark: boolean): Theme {
   if (setting === "system") return prefersDark ? "dark" : "light";
   return setting;
-}
-
-/** Cycles light -> dark -> system, the order the toggle steps through. */
-export function nextSetting(current: ThemeSetting): ThemeSetting {
-  switch (current) {
-    case "light":
-      return "dark";
-    case "dark":
-      return "system";
-    default:
-      return "light";
-  }
 }
 
 /** Reads the persisted setting, defaulting to `system`. */
@@ -61,17 +78,3 @@ export function syncWindowTheme(theme: Theme): void {
   }
 }
 
-/** The label + icon shown by the toggle for each setting. */
-export function settingPresentation(setting: ThemeSetting): {
-  label: string;
-  title: string;
-} {
-  switch (setting) {
-    case "light":
-      return { label: "Light", title: "Theme: light. Click for dark." };
-    case "dark":
-      return { label: "Dark", title: "Theme: dark. Click to follow the system." };
-    default:
-      return { label: "Auto", title: "Theme: follows the system. Click for light." };
-  }
-}

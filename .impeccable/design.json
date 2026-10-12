@@ -22,7 +22,7 @@
   "colorStrategy": "restrained: achromatic + one lime, plus meaning-bearing state colour",
   "surfaceStack": ["#ffffff", "#f5f5eb", "#beff50", "#30302a"],
   "theme": {
-    "toggle": "topbar button, cycles Auto -> Light -> Dark",
+    "toggle": "topbar gear opens a Settings menu; theme is a radio choice of Auto / Light / Dark",
     "persistence": "localStorage key kandel.theme",
     "appliedAs": "data-theme attribute on <html>, plus window setTheme",
     "systemFollow": "prefers-color-scheme, updates live",

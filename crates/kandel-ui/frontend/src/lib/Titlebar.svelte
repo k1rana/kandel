@@ -3,7 +3,7 @@
   import type { Tally } from "./format";
   import type { ThemeSetting } from "./theme";
   import About from "./About.svelte";
-  import ThemeToggle from "./ThemeToggle.svelte";
+  import SettingsMenu from "./SettingsMenu.svelte";
 
   // The application mark, generated from the same geometry as the app icon.
   import markUrl from "../assets/brand-mark.svg";
@@ -13,16 +13,32 @@
     tally,
     onAdd,
     themeSetting,
-    onToggleTheme,
+    onSelectTheme,
+    prefersDark = false,
+    updateAvailable = false,
   }: {
     maximized?: boolean;
     tally: Tally;
     onAdd: () => void;
     themeSetting: ThemeSetting;
-    onToggleTheme: () => void;
+    onSelectTheme: (next: ThemeSetting) => void;
+    /** The OS preference, forwarded to the Settings menu's `Auto` label. */
+    prefersDark?: boolean;
+    /**
+     * Whether a newer release is known to exist.
+     *
+     * Drives the dot above the wordmark. The update flow lives in About, so the
+     * wordmark carries the notice; until a source for it exists this stays
+     * `false` and no dot is drawn.
+     */
+    updateAvailable?: boolean;
   } = $props();
 
   let aboutOpen = $state(false);
+
+  // Describes the dot for assistive tech; the wordmark alone would not say why
+  // it is marked.
+  const UPDATE_NOTICE_ID = "kandel-update-notice";
 
   // Micro-caps summary of the ledger: total, and how many are alive.
   let summary = $derived(
@@ -43,26 +59,31 @@
       title="About Kandel"
       aria-haspopup="dialog"
       aria-expanded={aboutOpen}
+      aria-describedby={updateAvailable ? UPDATE_NOTICE_ID : undefined}
       onclick={() => (aboutOpen = !aboutOpen)}
     >
       <!-- With custom window chrome there is no OS title-bar icon, so the mark
            here is the only place the window shows its identity. -->
       <img class="mark" src={markUrl} alt="" width="18" height="18" />
       <span>Kandel</span>
+      {#if updateAvailable}
+        <span class="mark-dot" aria-hidden="true"></span>
+        <span id={UPDATE_NOTICE_ID} class="visually-hidden">Update available</span>
+      {/if}
     </button>
     <span class="rule" aria-hidden="true"></span>
     <span class="tally">{summary}</span>
   </div>
 
   <div class="trail">
-    <ThemeToggle setting={themeSetting} onToggle={onToggleTheme} />
-
     <button class="add" type="button" onclick={onAdd}>
       <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
         <path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
       </svg>
       Add app
     </button>
+
+    <SettingsMenu setting={themeSetting} {prefersDark} onSelect={onSelectTheme} />
 
     <div class="wc">
       <button class="ctl" type="button" title="Minimize" aria-label="Minimize" onclick={() => minimizeWindow()}>
@@ -121,6 +142,7 @@
   }
   .wordmark {
     /* Reads as the wordmark but is a button: it opens the About popover. */
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: var(--s-8);
@@ -146,6 +168,26 @@
   .wordmark:hover {
     background: var(--wash);
   }
+  /* The update notice: a small ink dot riding the wordmark's top-right corner.
+     Ink, not lime — lime already means "alive" on the state charge, so a green
+     dot here would read as health rather than as an available update. */
+  .mark-dot {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 7px;
+    height: 7px;
+    border-radius: var(--r-pill);
+    background: var(--ink);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .rule {
     width: 1px;
     height: 18px;
@@ -166,7 +208,7 @@
   .trail {
     display: flex;
     align-items: center;
-    gap: var(--s-12);
+    gap: var(--s-8);
     padding-right: var(--s-4);
   }
 

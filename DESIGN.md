@@ -68,10 +68,17 @@ dark-specific colour.
 
 ### Theme selection
 
-The topbar toggle cycles **Auto → Light → Dark**. `Auto` follows the OS via
-`prefers-color-scheme` and updates live. The choice persists in `localStorage`
+The gear opens the **Settings** menu, which lists the theme as three radio
+options: **Auto → Light → Dark**. `Auto` follows the OS via
+`prefers-color-scheme` and updates live, and its label names the theme it is
+currently following (`Auto (Dark)`). The choice persists in `localStorage`
 under `kandel.theme`; the rendered theme is applied as `data-theme` on the
 `<html>` element, and the OS window chrome follows via `setTheme`.
+
+The menu carries keyboard navigation (arrow keys, Home/End, Escape) and marks
+the active option with `aria-checked`. A theme choice is explicit rather than a
+cycle through hidden states, which also leaves the menu as the natural home for
+further global preferences.
 
 ### Dark contrast (WCAG, measured)
 
@@ -128,7 +135,12 @@ gutter use 24px; the empty state breathes at 48px.
 ## Components
 
 - **Topbar** — a white 54px bar: wordmark, a micro-caps live tally, the lime
-  "Add app" pill, and three window controls. The bar is the window drag region.
+  "Add app" pill, a quiet gear that opens the Settings menu, and three window
+  controls. The bar is the window drag region. When a newer release is known,
+  a small ink dot rides the wordmark's top-right corner as the update notice.
+- **Settings menu** — a white popover (ink border, 18px radius) anchored under
+  the gear, holding the theme choice. Options are radio items with a trailing
+  check, so the current setting is visible without cycling.
 - **Ledger** — a parchment card, 28px, with an ink-ruled micro-caps header and
   one row per app: state charge, name, command line, state word, right-aligned
   tabular PID and restart count.

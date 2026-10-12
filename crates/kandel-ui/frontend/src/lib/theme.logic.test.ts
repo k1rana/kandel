@@ -2,13 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyTheme,
-  nextSetting,
   readSetting,
   resolveTheme,
-  settingPresentation,
+  THEME_OPTIONS,
   THEME_STORAGE_KEY,
+  themeLabel,
   writeSetting,
-  type ThemeSetting,
 } from "./theme";
 
 describe("resolveTheme", () => {
@@ -20,20 +19,6 @@ describe("resolveTheme", () => {
   it("follows the OS preference for system", () => {
     expect(resolveTheme("system", true)).toBe("dark");
     expect(resolveTheme("system", false)).toBe("light");
-  });
-});
-
-describe("nextSetting", () => {
-  it("cycles light -> dark -> system -> light", () => {
-    expect(nextSetting("light")).toBe("dark");
-    expect(nextSetting("dark")).toBe("system");
-    expect(nextSetting("system")).toBe("light");
-  });
-
-  it("returns to the starting point after a full cycle", () => {
-    let s: ThemeSetting = "system";
-    for (let i = 0; i < 3; i++) s = nextSetting(s);
-    expect(s).toBe("system");
   });
 });
 
@@ -85,13 +70,21 @@ describe("applyTheme", () => {
   });
 });
 
-describe("settingPresentation", () => {
-  it("names each setting and titles the next action", () => {
-    expect(settingPresentation("light").label).toBe("Light");
-    expect(settingPresentation("dark").label).toBe("Dark");
-    expect(settingPresentation("system").label).toBe("Auto");
-    expect(settingPresentation("light").title).toContain("dark");
-    expect(settingPresentation("dark").title).toContain("system");
-    expect(settingPresentation("system").title).toContain("light");
+describe("THEME_OPTIONS", () => {
+  it("lists Auto, Light, Dark in that order", () => {
+    expect(THEME_OPTIONS.map((o) => o.value)).toEqual(["system", "light", "dark"]);
+    expect(THEME_OPTIONS.map((o) => o.label)).toEqual(["Auto", "Light", "Dark"]);
+  });
+});
+
+describe("themeLabel", () => {
+  it("names the explicit settings plainly", () => {
+    expect(themeLabel("light", true)).toBe("Light");
+    expect(themeLabel("dark", false)).toBe("Dark");
+  });
+
+  it("resolves Auto to the theme the OS is following", () => {
+    expect(themeLabel("system", true)).toBe("Auto (Dark)");
+    expect(themeLabel("system", false)).toBe("Auto (Light)");
   });
 });

@@ -18,8 +18,8 @@
     formatCommandLine,
     isSupportedCommandFile,
     logRows,
+    mergeLedgerRows,
     normalizeEnv,
-    rowsFromConfig,
     sanitizeEnvKey,
     stateView,
     summarize,
@@ -40,23 +40,16 @@
     type ThemeSetting,
   } from "./lib/theme";
 
-  // ── Ledger state ─────────────────────────────────────────────────────────
+  // ── Ledger state ────────────────────────────────────────────────
   // Two sources, kept apart:
-  //   configRows — every entry in config.toml (the source of truth)
-  //   liveApps   — statuses pushed by the core over IPC
-  // Deriving the ledger from both means it is correct the moment the UI opens,
-  // even when no core is attached (during development) or before the first
-  // status arrives. Config decides *which* rows exist, so a deleted entry can
-  // never linger; live status only supplies the state of rows that exist.
-  let configRows = $state<Record<string, AppStateInfo>>({});
+  //   configEntries — every entry in config.toml (the source of truth)
+  //   liveApps      — statuses pushed by the core over IPC
+  // The ledger merges them per field: config decides *which* rows exist and
+  // *what* they are (command, args, enabled), so a saved edit shows at once;
+  // live status supplies *how* they run (state, pid, restart count).
+  let configEntries = $state<Record<string, AppConfig>>({});
   let liveApps = $state<Record<string, AppStateInfo>>({});
-  let apps = $derived.by(() => {
-    const merged: Record<string, AppStateInfo> = {};
-    for (const [name, row] of Object.entries(configRows)) {
-      merged[name] = liveApps[name] ?? row;
-    }
-    return merged;
-  });
+  let apps = $derived.by(() => mergeLedgerRows(configEntries, liveApps));
   let appList = $derived(
     Object.values(apps).sort((a, b) =>
       a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
@@ -69,7 +62,7 @@
   async function refreshFromConfig() {
     try {
       const configs = await getFullConfig();
-      configRows = rowsFromConfig(configs);
+      configEntries = configs;
     } catch (e) {
       errorMessage = `Could not read the config: ${e}`;
     }

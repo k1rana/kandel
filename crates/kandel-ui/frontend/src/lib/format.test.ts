@@ -9,7 +9,9 @@ import {
   formatCommandLine,
   isSupportedCommandFile,
   logRows,
+  mergeLedgerRows,
   normalizeEnv,
+  parseArgs,
   rowsFromConfig,
   sanitizeEnvKey,
   stateView,
@@ -240,7 +242,12 @@ describe("rowsFromConfig", () => {
     expect(rows.a.restartCount).toBe(0);
   });
 
-  it("starts a seeded row with no args (live status supplies them)", () => {
+  it("parses the config's args string into argv", () => {
+    const rows = rowsFromConfig({ a: { enabled: true, command: "x", args: '-c "hello world"' } });
+    expect(rows.a.args).toEqual(["-c", "hello world"]);
+  });
+
+  it("defaults args to an empty list when the config omits them", () => {
     const rows = rowsFromConfig({ a: { enabled: true, command: "x" } });
     expect(rows.a.args).toEqual([]);
   });
@@ -250,33 +257,61 @@ describe("rowsFromConfig", () => {
   });
 });
 
-describe("ledger merge (config decides which rows exist)", () => {
-  // Mirrors the derive in App.svelte: config keys win, live supplies state.
-  function merge(
-    configRows: Record<string, AppStateInfo>,
-    live: Record<string, AppStateInfo>,
-  ) {
-    const out: Record<string, AppStateInfo> = {};
-    for (const [name, row] of Object.entries(configRows)) out[name] = live[name] ?? row;
-    return out;
-  }
-
-  it("shows config rows before any status arrives", () => {
-    const rows = rowsFromConfig({ a: { enabled: true, command: "x" } });
-    expect(Object.keys(merge(rows, {}))).toEqual(["a"]);
+describe("parseArgs", () => {
+  it("splits on whitespace", () => {
+    expect(parseArgs("-v --debug")).toEqual(["-v", "--debug"]);
   });
 
-  it("lets live status override the seeded row", () => {
-    const rows = rowsFromConfig({ a: { enabled: true, command: "x" } });
+  it("keeps quoted runs together", () => {
+    expect(parseArgs('-c "hello world"')).toEqual(["-c", "hello world"]);
+    expect(parseArgs("-c 'hello world'")).toEqual(["-c", "hello world"]);
+  });
+
+  it("treats backslashes literally outside double quotes", () => {
+    expect(parseArgs("C:\\Users\\alice\\app.exe")).toEqual(["C:\\Users\\alice\\app.exe"]);
+  });
+
+  it("escapes backslashes inside double quotes", () => {
+    expect(parseArgs('"a\\"b"')).toEqual(['a"b']);
+  });
+
+  it("collapses runs of whitespace", () => {
+    expect(parseArgs("  -a   -b\t-c ")).toEqual(["-a", "-b", "-c"]);
+  });
+
+  it("throws on an unterminated quote", () => {
+    expect(() => parseArgs("'oops")).toThrow();
+    expect(() => parseArgs('"oops')).toThrow();
+  });
+});
+
+describe("mergeLedgerRows (config wins on identity, live on state)", () => {
+  it("shows config rows before any status arrives", () => {
+    const configs = { a: { enabled: true, command: "x" } };
+    expect(Object.keys(mergeLedgerRows(configs, {}))).toEqual(["a"]);
+  });
+
+  it("takes state and pid from live status", () => {
+    const configs = { a: { enabled: true, command: "x" } };
     const live = { a: status({ name: "a", state: "Running", pid: 99 }) };
-    const merged = merge(rows, live);
+    const merged = mergeLedgerRows(configs, live);
     expect(merged.a.state).toBe("Running");
     expect(merged.a.pid).toBe(99);
   });
 
+  it("keeps the config's command even when live status is stale", () => {
+    // The regression: a saved command edit must show immediately, not after the
+    // core's next status lands (which waits out the stop timeout on a restart).
+    const configs = { a: { enabled: true, command: "new.exe", args: "--new" } };
+    const live = { a: status({ name: "a", command: "old.exe", args: ["--old"] }) };
+    const merged = mergeLedgerRows(configs, live);
+    expect(merged.a.command).toBe("new.exe");
+    expect(merged.a.args).toEqual(["--new"]);
+  });
+
   it("drops a row removed from config even if live status lingers", () => {
     const live = { gone: status({ name: "gone", state: "Running" }) };
-    expect(merge({}, live)).toEqual({});
+    expect(mergeLedgerRows({}, live)).toEqual({});
   });
 });
 

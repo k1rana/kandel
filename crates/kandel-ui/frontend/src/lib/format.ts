@@ -145,12 +145,75 @@ export interface Tally {
 
 /** Minimal shape needed to build a ledger row from config.
  *
- * Only `enabled` and `command` are required: the row's args come from live
- * status once it arrives. The UI's `AppConfig` DTO stores args as one
- * shell-formatted string, so it satisfies this shape directly. */
+ * The UI's `AppConfig` DTO satisfies this shape directly: it stores `args` as
+ * one shell-formatted string, which {@link parseArgs} turns back into argv. */
 export interface ConfigEntry {
   enabled: boolean;
   command: string;
+  /** Shell-formatted arguments, as stored in the config DTO. */
+  args?: string;
+}
+
+/** Splits a shell-like argument string into individual arguments.
+ *
+ * Mirrors the backend `parse_args` so the ledger shows the same argv the core
+ * will launch: single- and double-quoted runs are respected, and backslashes
+ * escape only inside double quotes (elsewhere `\` is literal, which matters for
+ * Windows paths). Throws on an unterminated quote, like the Rust version.
+ */
+export function parseArgs(input: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (const ch of input) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inDouble) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (/\s/.test(ch) && !inSingle && !inDouble) {
+      if (current !== "") {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+
+  if (inSingle) throw new Error("unterminated single quote in args string");
+  if (inDouble) throw new Error("unterminated double quote in args string");
+  if (current !== "") args.push(current);
+  return args;
+}
+
+/** Parses `input`, returning `[]` when it is absent or malformed.
+ *
+ * The backend validates and re-serializes `args` before it reaches the UI, so a
+ * parse failure is not expected here; this only keeps a malformed value from
+ * blanking the row. */
+function parseArgsSafe(input: string | undefined): string[] {
+  if (input === undefined) return [];
+  try {
+    return parseArgs(input);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -177,11 +240,33 @@ export function rowsFromConfig(configs: Record<string, ConfigEntry>): Record<str
       pid: 0,
       enabled: cfg.enabled,
       command: cfg.command,
-      args: [],
+      args: parseArgsSafe(cfg.args),
       restartCount: 0,
     };
   }
   return rows;
+}
+
+/** Merges config rows with live status into ledger rows.
+ *
+ * Config decides *what* an entry is (`enabled`, `command`, `args`), so an edit
+ * saved to `config.toml` is reflected immediately; live status only supplies
+ * *how* it is running (`state`, `pid`, `restartCount`). Taking the whole entry
+ * from live status would hide a just-saved edit until the core's next status
+ * lands — which, for a restart, waits out the graceful-stop timeout.
+ */
+export function mergeLedgerRows(
+  configs: Record<string, ConfigEntry>,
+  live: Record<string, AppStateInfo>,
+): Record<string, AppStateInfo> {
+  const merged: Record<string, AppStateInfo> = {};
+  for (const [name, row] of Object.entries(rowsFromConfig(configs))) {
+    const status = live[name];
+    merged[name] = status
+      ? { ...status, enabled: row.enabled, command: row.command, args: row.args }
+      : row;
+  }
+  return merged;
 }
 
 /** Counts the ledger's apps and how many are healthy. */

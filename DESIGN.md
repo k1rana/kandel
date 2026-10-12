@@ -35,7 +35,7 @@ degraded/failed entries — never as decoration.
 | `--parchment` | `#f5f5eb` | Card surfaces (the ledger).                                 |
 | `--canvas`    | `#ffffff` | Page ground; raised surfaces, inputs, bars.                 |
 | `--alert`     | `#b83c28` | Failed state only (tuned to clear AA on parchment).         |
-| `--degraded`  | `#96581a` | Starting/Retrying state only.                               |
+| `--degraded`  | `#96581a` | Starting/Restarting/Retrying state only.                    |
 
 ### Surface stack
 
@@ -132,9 +132,10 @@ gutter use 24px; the empty state breathes at 48px.
 - **Ledger** — a parchment card, 28px, with an ink-ruled micro-caps header and
   one row per app: state charge, name, command line, state word, right-aligned
   tabular PID and restart count.
-- **State charge** — a 10px rounded square: lime (running), amber (retrying),
-  red (failed), hollow stone ring (stopped/paused). A real border, never a
-  shadow. The state word carries the meaning; colour never stands alone.
+- **State charge** — a 10px rounded square: lime (running), amber (starting,
+  restarting, retrying), red (failed), hollow stone ring (stopped/paused). A real
+  border, never a shadow. The state word carries the meaning; colour never stands
+  alone.
 - **Editor panel** — a white 28px panel over a `rgba(20,20,15,0.32)` scrim. The
   header and footer are pinned; only the form body scrolls. Focus is trapped
   and moved to the name field on open.

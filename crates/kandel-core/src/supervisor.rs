@@ -65,6 +65,10 @@ impl Supervisor {
                         Action::Stop => {
                             tracing::info!(component = "reconciler", action = "STOP", app = %name, reason = "disabled");
                             existing.set_config(desired_cfg.clone());
+                            // Announce the stop before the blocking call, so the
+                            // row does not read "Running" while the process is
+                            // being shut down.
+                            existing.set_state(AppState::Stopped);
                             existing.stop();
                         }
                         Action::Start => {
@@ -76,6 +80,12 @@ impl Supervisor {
                         Action::Restart => {
                             tracing::info!(component = "reconciler", action = "RESTART", app = %name, reason = "identity changed");
                             existing.set_config(desired_cfg.clone());
+                            // Announce the restart before the blocking stop below,
+                            // so the UI does not keep showing "Running" (with a
+                            // stale PID) while the process is being torn down.
+                            // This emit carries the desired config as well, so
+                            // the row's command/args update at the same moment.
+                            existing.set_state(AppState::Restarting);
                             existing.stop();
                             let monitor = self.make_monitor(name, desired_cfg);
                             monitor.start();

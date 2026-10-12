@@ -134,6 +134,18 @@ impl Monitor {
         *self.inner.config.lock().unwrap() = cfg;
     }
 
+    /// Emits `state` with a zero PID, preserving the current restart count.
+    ///
+    /// The reconciler calls this *before* a blocking stop so the UI reflects
+    /// that the process is being torn down, instead of showing a stale
+    /// "Running" for the duration of the stop. The config must already be up to
+    /// date (see [`Self::set_config`]), since the emitted status carries its
+    /// command and args.
+    pub fn set_state(&self, state: AppState) {
+        let restart_count = self.inner.state.lock().unwrap().restart_count;
+        self.inner.emit(state, 0, restart_count);
+    }
+
     /// Hot-reloads the monitoring parameters without restarting the process.
     pub fn update_monitoring_params(&self, cfg: App) {
         let mut current = self.inner.config.lock().unwrap();

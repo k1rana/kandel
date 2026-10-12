@@ -191,6 +191,7 @@ describe("stateView", () => {
   it("maps known states to the ledger vocabulary", () => {
     expect(stateView("Running")).toMatchObject({ label: "Running", tone: "alive", healthy: true });
     expect(stateView("Starting")).toMatchObject({ label: "Starting", tone: "waiting" });
+    expect(stateView("Restarting")).toMatchObject({ label: "Restarting", tone: "waiting" });
     expect(stateView("Retrying")).toMatchObject({ label: "Retrying", tone: "waiting" });
     expect(stateView("Failed")).toMatchObject({ label: "Failed", tone: "down" });
     expect(stateView("Stopped")).toMatchObject({ label: "Stopped", tone: "idle" });
@@ -202,6 +203,7 @@ describe("stateView", () => {
 
   it("marks only running as healthy", () => {
     expect(stateView("Running").healthy).toBe(true);
+    expect(stateView("Restarting").healthy).toBe(false);
     expect(stateView("Retrying").healthy).toBe(false);
     expect(stateView("Failed").healthy).toBe(false);
   });

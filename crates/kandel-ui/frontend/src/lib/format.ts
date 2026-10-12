@@ -119,6 +119,8 @@ export function stateView(state: string): StateView {
       return { label: "Running", tone: "alive", healthy: true };
     case "starting":
       return { label: "Starting", tone: "waiting", healthy: false };
+    case "restarting":
+      return { label: "Restarting", tone: "waiting", healthy: false };
     case "retrying":
       return { label: "Retrying", tone: "waiting", healthy: false };
     case "failed":

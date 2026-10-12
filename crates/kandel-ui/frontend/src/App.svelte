@@ -212,7 +212,8 @@
   // ── Ledger presentation ──────────────────────────────────────────────────
 
   /** A disabled entry is reported as "Paused" regardless of its core state:
-   * that is what the user needs to know. */
+   * that is what the user needs to know. One concept, one word: the ledger, the
+   * row menu (Pause/Resume), and the editor checkbox all say "paused". */
   function displayState(app: AppStateInfo) {
     return app.enabled ? stateView(app.state) : { label: "Paused", tone: "idle" as const, healthy: false };
   }
@@ -389,7 +390,7 @@
       await updateAppConfig(appName, { ...cfg, enabled: target });
       await refreshFromConfig();
     } catch (e) {
-      errorMessage = `Could not ${target ? "enable" : "pause"} "${appName}": ${e}`;
+      errorMessage = `Could not ${target ? "resume" : "pause"} "${appName}": ${e}`;
     }
   }
 
@@ -401,7 +402,7 @@
       const configs = await getFullConfig();
       const cfg = configs[appName];
       if (!cfg) return;
-      // Pause, let the core's debounce stop it, then re-enable.
+      // Pause, let the core's debounce stop it, then resume.
       await updateAppConfig(appName, { ...cfg, enabled: false });
       await refreshFromConfig();
       await new Promise((r) => setTimeout(r, 900));
@@ -788,7 +789,7 @@
           <div class="checks span2">
             <label class="check">
               <input type="checkbox" bind:checked={editForm.enabled} />
-              <span>Supervised</span>
+              <span>Paused</span>
             </label>
             <label class="check">
               <input type="checkbox" bind:checked={editForm.hideWindow} />

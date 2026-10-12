@@ -12,6 +12,9 @@ pub enum AppState {
     Starting,
     /// Running and healthy.
     Running,
+    /// The process is being stopped so it can be relaunched (a config change
+    /// with a new process identity).
+    Restarting,
     /// Waiting to retry after an unexpected exit.
     Retrying,
     /// Retries exhausted; no further attempts will be made.
@@ -27,6 +30,7 @@ impl AppState {
             AppState::Stopped => "Stopped",
             AppState::Starting => "Starting",
             AppState::Running => "Running",
+            AppState::Restarting => "Restarting",
             AppState::Retrying => "Retrying",
             AppState::Failed => "Failed",
             AppState::Removed => "Removed",
@@ -68,6 +72,9 @@ mod tests {
     fn state_serializes_pascal_case() {
         let json = serde_json::to_string(&AppState::Running).unwrap();
         assert_eq!(json, "\"Running\"");
+        // The UI matches on this exact string, so keep the spelling stable.
+        let json = serde_json::to_string(&AppState::Restarting).unwrap();
+        assert_eq!(json, "\"Restarting\"");
     }
 
     #[test]

@@ -20,7 +20,7 @@
  * tray app that will not exit on its own, so Ctrl+C has to take it down.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
@@ -31,6 +31,33 @@ const win = process.platform === "win32";
 const PORT = 1420;
 const URL = `http://localhost:${PORT}/`;
 const exe = (name) => path.join(root, "target", "debug", win ? `${name}.exe` : name);
+
+// Dev runs against a repo-local scratch config instead of the real
+// %USERPROFILE%\.config\kandel\config.toml, so a contributor's own entries
+// cannot break the dev loop (and dev edits cannot reach their real config).
+// The file is created on first run and gitignored.
+const DEV_CONFIG_DIR = path.join(root, ".dev");
+const DEV_CONFIG = path.join(DEV_CONFIG_DIR, "config.toml");
+
+/** Written only when `.dev/config.toml` is absent; edit it freely afterwards. */
+const DEV_CONFIG_SEED = `# Local dev config created by scripts/dev.mjs.
+# Gitignored. Your real config is %USERPROFILE%\\.config\\kandel\\config.toml, untouched.
+
+["Welcome to Kandel"]
+command = "cmd.exe"
+args = ["/c", "echo Welcome to Kandel (dev)! & timeout /t 20"]
+restart_delay_sec = 1
+healthy_timeout_sec = 30
+max_retries = 5
+`;
+
+/** Creates the repo-local dev config the first time dev runs. */
+function ensureDevConfig() {
+  if (existsSync(DEV_CONFIG)) return;
+  mkdirSync(DEV_CONFIG_DIR, { recursive: true });
+  writeFileSync(DEV_CONFIG, DEV_CONFIG_SEED);
+  console.log(`[dev] created ${path.relative(root, DEV_CONFIG)}`);
+}
 
 /** Runs a command to completion, inheriting stdio. */
 const run = (cmd, args) =>
@@ -116,11 +143,18 @@ async function main() {
     console.error("[dev] expected binaries are missing after the build");
     return 1;
   }
-  console.log("[dev] starting the core + UI window (Ctrl+C stops everything)…");
-  const args = ["-ui"];
-  if (process.env.KANDEL_CONFIG) args.push("-f", process.env.KANDEL_CONFIG);
+  // Repo-local scratch config by default; KANDEL_CONFIG still overrides it.
+  const configPath = process.env.KANDEL_CONFIG
+    ? path.resolve(root, process.env.KANDEL_CONFIG)
+    : DEV_CONFIG;
+  if (configPath === DEV_CONFIG) ensureDevConfig();
 
-  const core = spawn(exe("kandel"), args, { cwd: root, stdio: "inherit" });
+  console.log(`[dev] config: ${path.relative(root, configPath)}`);
+  console.log("[dev] starting the core + UI window (Ctrl+C stops everything)…");
+  const core = spawn(exe("kandel"), ["-ui", "-f", configPath], {
+    cwd: root,
+    stdio: "inherit",
+  });
   children.push(core);
 
   const code = await new Promise((resolve) => core.on("exit", (c) => resolve(c ?? 0)));

@@ -40,6 +40,9 @@ crates/kandel-ui/gen/
 *.log
 rustup-*.log
 
+# Dev scratch config created by `pnpm dev` (scripts/dev.mjs)
+.dev/
+
 # IDE and OS temporary files
 .DS_Store
 .idea/

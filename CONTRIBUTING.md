@@ -1,6 +1,6 @@
 # Contributing
 
-Kandel is a Rust workspace with a Svelte frontend. This page covers the dev setup and the test commands. For what the app does and how to run the built binaries, see the [README](./README.md).
+Kandel is a Rust workspace with a Svelte frontend. This page covers the dev setup, the test commands, and the commit conventions. For what the app does and how to run the built binaries, see the [README](./README.md).
 
 ## Development
 
@@ -9,7 +9,9 @@ pnpm install   # first time only: Tauri CLI and frontend dependencies
 pnpm dev       # build core + UI, start Vite, then launch the core with -ui
 ```
 
-Set `KANDEL_CONFIG` to point the core at a scratch config. Ctrl+C stops everything.
+`pnpm dev` runs the core against a repo-local scratch config at `.dev/config.toml`, created on first run and gitignored, so your real `%USERPROFILE%\.config\kandel\config.toml` is never touched. Set `KANDEL_CONFIG` to point at a different file. Ctrl+C stops everything.
+
+Dev builds use a separate single-instance lock from release builds, so a `pnpm dev` core can run at the same time as an installed Kandel. Two dev cores still cannot run together.
 
 > [!NOTE]
 > Use `pnpm dev`, not `tauri dev`. Only the window the core spawns gets the status pipe, so a UI opened by `tauri dev` renders without live state.

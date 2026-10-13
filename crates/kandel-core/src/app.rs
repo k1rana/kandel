@@ -26,7 +26,15 @@ use crate::win::to_wide_null;
 
 /// Session-local mutex name. The `Local\` prefix scopes it to the current
 /// Windows session, so different signed-in users can each run their own Kandel.
+///
+/// Debug (dev) builds use a distinct name so a development core can run
+/// alongside an installed release build instead of being rejected as a second
+/// instance. Release builds keep the original name, so production behavior is
+/// unchanged.
+#[cfg(not(debug_assertions))]
 const INSTANCE_MUTEX_NAME: &str = r"Local\Kandel-core-6d3fe7b9-a7fc-48e8-bc7a-66d205c03b0e";
+#[cfg(debug_assertions)]
+const INSTANCE_MUTEX_NAME: &str = r"Local\Kandel-core-dev-6d3fe7b9-a7fc-48e8-bc7a-66d205c03b0e";
 
 /// Runs the core process. Blocks until the user quits.
 pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {

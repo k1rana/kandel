@@ -1,9 +1,14 @@
 name: Release
 
-# Cuts releases from `main` with semantic-release: it derives the next version
-# from Conventional Commits, bumps the single-source version in Cargo.toml,
-# builds both binaries, publishes the GitHub release with its assets, and
-# commits the bump back (tagged `[skip ci]`, so this workflow does not re-fire).
+# Cuts releases with semantic-release: it derives the next version from
+# Conventional Commits, bumps the single-source version in Cargo.toml, builds
+# both binaries, and publishes the GitHub release with its assets.
+#
+# `main` cuts stable releases and commits the bump back (tagged `[skip ci]`, so
+# this workflow does not re-fire). `N.x-dev` branches cut `beta` pre-releases
+# and do *not* commit the bump — the version is transient there, so dev branches
+# never conflict with `main` on the Cargo.toml version line. See
+# `release.config.cjs` for the per-branch behaviour.
 #
 # Publishing happens here in CI — never locally. The version is written by
 # `scripts/release/prepare.mjs`; nothing in the repo declares it twice.
@@ -14,7 +19,8 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    # `main` for stable releases; any `N.x-dev` for beta pre-releases.
+    branches: [main, '+([0-9]).x-dev']
   workflow_dispatch:
     inputs:
       release_type:
@@ -129,7 +135,13 @@ jobs:
     # repository variable to `true` once the package is live there. Without this,
     # every early release would show a failing job for a package WinGet does not
     # have yet.
-    if: needs.release.outputs.released == 'true' && vars.WINGET_ENABLED == 'true'
+    #
+    # Stable releases only: a `N.x-dev` run cuts a `beta` pre-release, which must
+    # never reach the WinGet package users install from.
+    if: >-
+      needs.release.outputs.released == 'true' &&
+      vars.WINGET_ENABLED == 'true' &&
+      github.ref == 'refs/heads/main'
     steps:
       # NOTE: this can only *update* an existing WinGet package. The very first
       # submission for `Tojoo.Kandel` must be made by hand to

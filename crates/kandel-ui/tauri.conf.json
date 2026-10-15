@@ -48,8 +48,13 @@
     ],
     "windows": {
       "nsis": {
+        "template": "windows/installer.nsi",
         "installerHooks": "windows/hooks.nsh",
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerIcon": "icons/installer.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "windows/header.bmp",
+        "sidebarImage": "windows/sidebar.bmp"
       }
     }
   }

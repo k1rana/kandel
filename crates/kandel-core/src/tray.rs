@@ -167,7 +167,23 @@ fn handle_auto_start_toggle(auto_start: Option<&AutoStartManager>, item: Option<
         return;
     };
 
-    let next_enabled = !item.is_checked();
+    // The registry is the source of truth. The menu library (muda) already
+    // flipped the checkbox before dispatching this MenuEvent (its Toggle
+    // action), so deriving the request from `item.is_checked()` would
+    // re-assert the state the user is trying to leave.
+    let current = match manager.enabled() {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            tracing::error!(component = "tray", error = %e, "failed to read logon startup");
+            show_error_dialog(
+                "Kandel - Error",
+                &format!("Failed to read the logon startup setting:\n\n{e}"),
+            );
+            return;
+        }
+    };
+
+    let next_enabled = !current;
     if let Err(e) = manager.set_enabled(next_enabled) {
         tracing::error!(component = "tray", enabled = next_enabled, error = %e, "failed to update logon startup");
         show_error_dialog(

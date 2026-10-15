@@ -49,9 +49,7 @@ pub fn snapshot_events(
 ///
 /// `snapshot` is invoked on every attach — initial connect *and* reconnect — so
 /// a late or returning client is never left with an empty ledger.
-pub fn serve(
-    snapshot: impl Fn() -> Vec<CoreEvent> + Send + Sync + 'static,
-) -> StatusServer {
+pub fn serve(snapshot: impl Fn() -> Vec<CoreEvent> + Send + Sync + 'static) -> StatusServer {
     let name = crate::win::pipe::local_pipe_name();
     let server = PipeServer::spawn(name.clone(), Arc::new(snapshot));
     tracing::info!(component = "ipc", pipe = %name, "status pipe published");

@@ -1,0 +1,50 @@
+# Mirror of the checks CI enforces, scoped to what is staged.
+# Rust checks only run when .rs files are staged; frontend checks only run
+# when frontend files are staged. Skip an individual commit with:
+#   git commit --no-verify
+
+if git diff --cached --check; then :; else
+  echo "pre-commit: whitespace/conflict-markers in staged files, fix them first" >&2
+  exit 1
+fi
+
+rust_staged="$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')"
+frontend_staged="$(git diff --cached --name-only --diff-filter=ACMR -- 'crates/kandel-ui/frontend/*')"
+
+if [ -n "$rust_staged" ]; then
+  echo "pre-commit: cargo fmt" >&2
+  cargo fmt --all --check || {
+    echo "pre-commit: cargo fmt failed. Run: cargo fmt --all" >&2
+    exit 1
+  }
+
+  echo "pre-commit: cargo clippy" >&2
+  cargo clippy --workspace --all-targets -- -D warnings || {
+    echo "pre-commit: clippy failed (fix warnings or use: git commit --no-verify)" >&2
+    exit 1
+  }
+
+  echo "pre-commit: cargo test" >&2
+  cargo test --workspace || {
+    echo "pre-commit: cargo test failed" >&2
+    exit 1
+  }
+fi
+
+if [ -n "$frontend_staged" ]; then
+  echo "pre-commit: svelte-check" >&2
+  pnpm --dir crates/kandel-ui/frontend exec svelte-check --tsconfig ./tsconfig.json || {
+    echo "pre-commit: svelte-check failed" >&2
+    exit 1
+  }
+
+  echo "pre-commit: frontend tests" >&2
+  pnpm --dir crates/kandel-ui/frontend test || {
+    echo "pre-commit: frontend tests failed" >&2
+    exit 1
+  }
+fi
+
+if [ -z "$rust_staged" ] && [ -z "$frontend_staged" ]; then
+  echo "pre-commit: nothing relevant staged, skipping checks" >&2
+fi

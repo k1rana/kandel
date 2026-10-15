@@ -15,6 +15,8 @@
     "test:ui": "pnpm --dir crates/kandel-ui/frontend test",
     "check": "cargo clippy --workspace --all-targets && pnpm run check:ui",
     "check:ui": "pnpm --dir crates/kandel-ui/frontend check",
+    "precommit": "sh .husky/pre-commit",
+    "prepare": "husky",
     "icons": "python scripts/make_icons.py",
     "clean": "shx rm -rf build target"
   },
@@ -23,6 +25,7 @@
     "@semantic-release/git": "^11.0.1",
     "@tauri-apps/cli": "^2",
     "conventional-changelog-conventionalcommits": "^9.1.0",
+    "husky": "^9.1.7",
     "semantic-release": "^25.0.9",
     "shx": "^0.4.0"
   },

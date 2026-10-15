@@ -12,7 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::autostart::AutoStartManager;
 use crate::dialog::show_error_dialog;
-use crate::notify::{Notifier, TRAY_GUID};
+use crate::notify::{tray_guid, Notifier};
 
 /// Embedded tray icon (PNG). Generated from `logo.png` at build time.
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
@@ -97,9 +97,11 @@ pub fn run(
         .with_menu(Box::new(menu))
         .with_tooltip("Kandel Process Monitor — double-click to open settings")
         .with_icon(icon)
-        // A stable GUID gives the icon a durable identity that the balloon
-        // notifier can address by name, instead of the crate's private counter.
-        .with_guid(TRAY_GUID)
+        // A stable GUID, scoped to this build profile, gives the icon a durable
+        // identity the balloon notifier can address. Profile-scoping keeps a dev
+        // core and an installed core, which may run at once, from fighting over
+        // one tray slot.
+        .with_guid(tray_guid())
         // The menu belongs to right-click only. Left-click means "open the
         // window", and leaving this at its `true` default would make a
         // left-click pop the menu instead.

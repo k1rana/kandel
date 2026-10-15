@@ -235,13 +235,19 @@ describe("rowsFromConfig", () => {
     expect(rows.paused.enabled).toBe(false);
   });
 
-  it("marks an unreported entry as Starting, not Stopped", () => {
-    // "Stopped" would imply it had already exited; the core has simply not
-    // reported yet.
+  it("marks an unreported entry as Unknown, not a lifecycle guess", () => {
+    // "Starting" would claim a launch is in progress and "Stopped" that it had
+    // already exited; neither is known before a core reports.
     const rows = rowsFromConfig({ a: { enabled: true, command: "x" } });
-    expect(rows.a.state).toBe("Starting");
+    expect(rows.a.state).toBe("Unknown");
     expect(rows.a.pid).toBe(0);
     expect(rows.a.restartCount).toBe(0);
+  });
+
+  it("renders an unknown state as its own tone", () => {
+    expect(stateView("Unknown")).toMatchObject({ label: "Unknown", tone: "unknown" });
+    // Unknown is neither a lifecycle word nor a health reading.
+    expect(stateView("Unknown").healthy).toBe(false);
   });
 
   it("parses the config's args string into argv", () => {

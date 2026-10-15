@@ -251,7 +251,7 @@ configured, and the child still inherits the environment.
 - **An edit to `config.toml` did nothing.** Either the file was written non-atomically and the core read a partial file, or a key is misspelled (`restart_delay` for `restart_delay_sec`). Unknown keys are rejected rather than ignored, so both cases fail to parse and the core keeps the previous state. Write to a `.tmp` file and rename it into place, and check the key names.
 - **The core exits right after launch and shows an error dialog.** `config.toml` failed to parse. Fix the TOML and start Kandel again.
 - **A second Kandel will not start.** Only one instance runs per Windows session. Sign out and back in as a different user to run another, or quit the existing one from the tray.
-- **The UI opens but shows no live status.** The UI only receives status when the core launches it with the `--ipc` flag. A UI opened outside the core (for example under `tauri dev`) has no status pipe and runs without live state.
+- **The UI opens but shows no live status.** The UI reads status from the core over a named pipe and reconnects on its own. A window opened before Kandel starts attaches as soon as it does, and if the core is restarted the window attaches to the new core. While no core is attached, the state column reads `Unknown`, because nothing has reported on those entries. If every row still reads `Unknown` after a moment, no core is running in that session. Start Kandel from the tray or the Start menu.
 - **Auto-start did not take effect.** The toggle writes to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` for the current user. Check that key if the entry is missing.
 
 ## Building from source

@@ -101,7 +101,7 @@ export function clampInt(value: number, min: number, max: number): number {
 /** The visual family a lifecycle state belongs to, used to pick its charge and
  * its text treatment. `charge` is the design vocabulary (a filled marker),
  * `tone` names which palette role carries it. */
-export type StateTone = "alive" | "waiting" | "down" | "idle";
+export type StateTone = "alive" | "waiting" | "down" | "idle" | "unknown";
 
 export interface StateView {
   /** Uppercased state word for the ledger. */
@@ -125,6 +125,8 @@ export function stateView(state: string): StateView {
       return { label: "Retrying", tone: "waiting", healthy: false };
     case "failed":
       return { label: "Failed", tone: "down", healthy: false };
+    case "unknown":
+      return { label: "Unknown", tone: "unknown", healthy: false };
     default:
       return { label: "Stopped", tone: "idle", healthy: false };
   }
@@ -219,19 +221,21 @@ function parseArgsSafe(input: string | undefined): string[] {
 }
 
 /**
- * State shown for a configured entry the core has not reported on yet.
+ * State of a configured entry before a supervisor reports on it.
  *
- * `Starting` is deliberate: the entry exists and the core is about to act on
- * it. `Stopped` would wrongly imply it had already exited.
+ * Rows come from `config.toml`, which says an entry *exists*, not how it is
+ * running. Until a core reports, the UI cannot know, so the row says so. That
+ * is also the state while no core is attached at all, so one word covers both.
  */
-export const PENDING_STATE = "Starting";
+export const PENDING_STATE = "Unknown";
 
 /** Builds ledger rows from the config file.
  *
- * The core pushes live status over IPC, but that stream only exists once the
- * UI is launched by the core. Deriving rows from config keeps the ledger
- * correct the moment it opens — including when the UI runs without a core
- * (during development) or before the first status arrives.
+ * Config is the source of truth for *which* entries exist, so the ledger is
+ * complete the moment the window opens, before any status arrives and whether
+ * or not a core is running. It supplies only what config knows: identity, the
+ * command, and whether the entry is enabled. Runtime facts (state, PID, restart
+ * count) are left unknown until a core reports them.
  */
 export function rowsFromConfig(configs: Record<string, ConfigEntry>): Record<string, AppStateInfo> {
   const rows: Record<string, AppStateInfo> = {};

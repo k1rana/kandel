@@ -3,18 +3,20 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 
-use kandel_config::{load_config, save_config, App as AppConfig, RuntimeFlags, DEFAULT_CONFIG};
+use kandel_config::{
+    instance_mutex_name, load_config, save_config, App as AppConfig, RuntimeFlags, DEFAULT_CONFIG,
+};
 
 use crate::autostart::AutoStartManager;
 use crate::dialog::show_error_dialog;
-use crate::ipc_server::UiManager;
+use crate::ipc_server::{self, StatusServer, UiLauncher};
 use crate::logs::LogStore;
 use crate::notify::Notifier;
 use crate::openwith::open_with_dialog;
@@ -23,18 +25,6 @@ use crate::supervisor::Supervisor;
 use crate::tray::{self, TrayCallbacks};
 use crate::watcher;
 use crate::win::to_wide_null;
-
-/// Session-local mutex name. The `Local\` prefix scopes it to the current
-/// Windows session, so different signed-in users can each run their own Kandel.
-///
-/// Debug (dev) builds use a distinct name so a development core can run
-/// alongside an installed release build instead of being rejected as a second
-/// instance. Release builds keep the original name, so production behavior is
-/// unchanged.
-#[cfg(not(debug_assertions))]
-const INSTANCE_MUTEX_NAME: &str = r"Local\Kandel-core-6d3fe7b9-a7fc-48e8-bc7a-66d205c03b0e";
-#[cfg(debug_assertions)]
-const INSTANCE_MUTEX_NAME: &str = r"Local\Kandel-core-dev-6d3fe7b9-a7fc-48e8-bc7a-66d205c03b0e";
 
 /// Runs the core process. Blocks until the user quits.
 pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
@@ -57,21 +47,19 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
         }
     };
 
-    let ui = UiManager::new();
     let logs = Arc::new(LogStore::new(crate::logs::DEFAULT_LOG_CAP));
-    let ui_for_logs = ui.clone();
 
-    // Every captured line and session marker is forwarded to the UI (as a
-    // `logs` event) and retained for the backlog a freshly opened UI fetches.
-    // Installing the sink here means output captured before the UI exists is
-    // still stored; it reaches the UI only once the UI is listening.
-    logs.set_sink(Box::new(move |name, event| {
-        ui_for_logs.send_log(name, event);
-    }));
-
-    let ui_for_cb = ui.clone();
+    // The status server and the supervisor need each other: the supervisor
+    // forwards events, and the server's snapshot reads the supervisor. Create a
+    // shared slot first, fill it once both exist, and let early events drop
+    // harmlessly until then (the store still retains them, and the first client
+    // gets them in the snapshot).
+    let server_slot: Arc<Mutex<Option<StatusServer>>> = Arc::new(Mutex::new(None));
+    let slot_for_state = Arc::clone(&server_slot);
     let on_state = Arc::new(move |status: MonitorStatus| {
-        ui_for_cb.send(&status);
+        if let Some(server) = slot_for_state.lock().unwrap().as_ref() {
+            server.send(&status);
+        }
     });
 
     // Notices raised before the tray exists are queued here and flushed once it
@@ -91,26 +79,43 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
         "initial reconciliation complete"
     );
 
+    // Publish the status pipe. Every attach (including a reconnect) replays the
+    // current statuses and log backlog, so a UI that opens late is never empty.
+    let supervisor_for_snapshot = Arc::clone(&supervisor);
+    let logs_for_snapshot = Arc::clone(&logs);
+    let server = ipc_server::serve(move || {
+        ipc_server::snapshot_events(
+            &supervisor_for_snapshot.all_statuses(),
+            &logs_for_snapshot.snapshot(),
+        )
+    });
+    *server_slot.lock().unwrap() = Some(server.clone());
+
+    // Captured output is retained in the store regardless; the sink forwards it
+    // to whichever UI is attached.
+    let server_for_logs = server.clone();
+    logs.set_sink(Box::new(move |name, event| {
+        server_for_logs.send_log(name, event);
+    }));
+
+    let ui = UiLauncher::new();
+
     // Watch config.toml for changes and reconcile.
     spawn_watcher(config_path.clone(), Arc::clone(&supervisor));
 
     // Open the UI at startup when `-ui` was passed, so development does not
     // depend on reaching the tray icon.
     if flags.open_ui {
-        let statuses = supervisor.all_statuses();
-        let backlog = logs.snapshot();
-        if let Err(e) = ui.show(&flags, &statuses, &backlog) {
+        if let Err(e) = ui.show(&flags) {
             tracing::error!(component = "main", error = %e, "failed to open the UI at startup");
         }
     }
 
     // Tray loop (blocks until quit).
     let supervisor_for_quit = Arc::clone(&supervisor);
-    let supervisor_for_open = Arc::clone(&supervisor);
     let ui_for_open = ui.clone();
     let flags_for_open = flags.clone();
     let config_path_for_config = config_path.clone();
-    let logs_for_open = Arc::clone(&logs);
 
     let result = tray::run(
         version,
@@ -118,11 +123,9 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
         notifier,
         TrayCallbacks {
             on_open_ui: Box::new(move || {
-                // Push the current statuses and log backlog immediately so the
-                // table and any open log are not empty until the next change.
-                let statuses = supervisor_for_open.all_statuses();
-                let backlog = logs_for_open.snapshot();
-                if let Err(e) = ui_for_open.show(&flags_for_open, &statuses, &backlog) {
+                // The window attaches to the status pipe on its own and receives
+                // the snapshot there, so opening is just launching the process.
+                if let Err(e) = ui_for_open.show(&flags_for_open) {
                     tracing::error!(component = "main", error = %e, "failed to show UI");
                 }
             }),
@@ -152,7 +155,7 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
 /// another instance already holds it. The handle is leaked intentionally so the
 /// mutex lives as long as the process.
 fn acquire_single_instance() -> Result<HANDLE> {
-    let name = to_wide_null(INSTANCE_MUTEX_NAME);
+    let name = to_wide_null(&instance_mutex_name());
     let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) };
     match handle {
         Ok(h) => {

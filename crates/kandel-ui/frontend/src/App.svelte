@@ -5,7 +5,9 @@
     deleteAppConfig,
     getFullConfig,
     getCommandExtensions,
+    getConnectionState,
     getInitialStatuses,
+    onConnectionChange,
     onStateUpdate,
     selectCommandPath,
     updateAppConfig,
@@ -20,6 +22,7 @@
     logRows,
     mergeLedgerRows,
     normalizeEnv,
+    PENDING_STATE,
     sanitizeEnvKey,
     stateView,
     summarize,
@@ -40,14 +43,20 @@
   } from "./lib/theme";
 
   // ── Ledger state ────────────────────────────────────────────────
+  // ── Ledger state ────────────────────────────────
   // Two sources, kept apart:
   //   configEntries — every entry in config.toml (the source of truth)
-  //   liveApps      — statuses pushed by the core over IPC
+  //   liveApps      — statuses the core streams while attached
   // The ledger merges them per field: config decides *which* rows exist and
   // *what* they are (command, args, enabled), so a saved edit shows at once;
-  // live status supplies *how* they run (state, pid, restart count).
+  // attached core status supplies *how* they run (state, pid, restart count).
+  // While detached the second source is empty and the rows say so.
   let configEntries = $state<Record<string, AppConfig>>({});
   let liveApps = $state<Record<string, AppStateInfo>>({});
+  // Whether a core is attached. While false the ledger still lists every
+  // configured entry, but runtime facts (state, PID, restart count) are unknown,
+  // so the rows say so instead of showing a last-known value that may be wrong.
+  let coreConnected = $state(false);
   let apps = $derived.by(() => mergeLedgerRows(configEntries, liveApps));
   let appList = $derived(
     Object.values(apps).sort((a, b) =>
@@ -55,6 +64,11 @@
     ),
   );
   let tally = $derived(summarize(apps));
+  // While detached, the per-row state is unknown, so the "N running" half of the
+  // tally would be a claim the UI cannot support. Report the count it does know.
+  let tallyForDisplay = $derived(
+    coreConnected ? tally : { total: tally.total, running: 0, attention: tally.total },
+  );
 
   /** Re-reads config.toml into the ledger. Called on mount and after every
    * config write, so the list reflects the file immediately. */
@@ -163,7 +177,7 @@
       applyCurrentTheme();
 
       // Seed the ledger from config.toml before any status arrives, so the
-      // list is correct even when no core is attached.
+      // list is complete whether or not a core is attached.
       await refreshFromConfig();
 
       // Subscribe before fetching the backlog: the core may have pushed
@@ -172,12 +186,39 @@
       await onStateUpdate((update) => {
         liveApps = applyStateUpdate(liveApps, update);
       });
-      for (const line of await getInitialStatuses()) {
-        try {
-          liveApps = applyStateUpdate(liveApps, JSON.parse(line));
-        } catch (e) {
-          console.error("Failed to parse a cached status:", e);
+
+      // Applies whatever the UI has cached. Also used on reconnect: attaching
+      // clears the cache, so this replaces the previous core's state with the
+      // fresh snapshot rather than merging two cores' rows.
+      const applyCachedStatuses = async () => {
+        for (const line of await getInitialStatuses()) {
+          try {
+            liveApps = applyStateUpdate(liveApps, JSON.parse(line));
+          } catch (e) {
+            console.error("Failed to parse a cached status:", e);
+          }
         }
+      };
+      await applyCachedStatuses();
+
+      // Reconnects are routine: the core may start after this window, or be
+      // restarted beneath it. Each attach brings a fresh snapshot, so pick it up
+      // rather than leaving the ledger on the previous core's last-known state.
+      //
+      // Subscribe first, then read the current state: the reader attaches as the
+      // UI process starts, which is usually before this code runs, so the first
+      // event has already fired by now and only the read can catch it.
+      await onConnectionChange(async (state) => {
+        coreConnected = state === "connected";
+        if (coreConnected) await applyCachedStatuses();
+      });
+      try {
+        coreConnected = await getConnectionState();
+        if (coreConnected) await applyCachedStatuses();
+      } catch (e) {
+        // Surfaced rather than swallowed: a failure here means the UI believes it
+        // is detached while the stream is live, so every row reads Unknown.
+        console.error("Failed to read the core connection state:", e);
       }
 
       // Log events arrive on their own stream, keyed by app name.
@@ -214,7 +255,16 @@
    * that is what the user needs to know. One concept, one word: the ledger, the
    * row menu (Pause/Resume), and the editor checkbox all say "paused". */
   function displayState(app: AppStateInfo) {
-    return app.enabled ? stateView(app.state) : { label: "Paused", tone: "idle" as const, healthy: false };
+    if (!app.enabled) return { label: "Paused", tone: "idle" as const, healthy: false };
+    // Without a supervisor the row's state is the config placeholder, so show
+    // the unknown word rather than let "Starting" read as a real transition.
+    return coreConnected ? stateView(app.state) : stateView(PENDING_STATE);
+  }
+
+  /** PID from the attached core, or nothing. A stale PID from a core that has
+   * since exited would imply the process is still alive. */
+  function displayPid(app: AppStateInfo): string {
+    return coreConnected && app.pid > 0 ? String(app.pid) : "—";
   }
 
   // ── Log panel ────────────────────────────────────────────────────────────
@@ -524,7 +574,7 @@
 <svelte:window />
 
 <main class="window">
-  <Titlebar {maximized} {tally} onAdd={openCreate} themeSetting={themeSetting} {prefersDark} onSelectTheme={selectTheme} />
+  <Titlebar {maximized} tally={tallyForDisplay} onAdd={openCreate} themeSetting={themeSetting} {prefersDark} onSelectTheme={selectTheme} />
 
   <div class="body">
     {#if appList.length === 0}
@@ -567,9 +617,11 @@
                 <td class="c-state">
                   <span class="state state-{view.tone}">{view.label}</span>
                 </td>
-                <td class="c-pid num tnum">{app.pid > 0 ? app.pid : "—"}</td>
+                <td class="c-pid num tnum">{displayPid(app)}</td>
                 <td class="c-restarts num tnum">
-                  {#if app.restartCount > 0}
+                  {#if !coreConnected}
+                    <span class="muted">—</span>
+                  {:else if app.restartCount > 0}
                     <span class="restarted">{app.restartCount}</span>
                   {:else}
                     <span class="muted">0</span>
@@ -584,7 +636,17 @@
   </div>
 
   <footer class="foot">
-    <span>Double-click a row to edit · right-click for actions</span>
+    {#if coreConnected}
+      <span>Double-click a row to edit · right-click for actions</span>
+    {:else}
+      <!-- Detached: rows come from config.toml alone, so the state column reads
+           Unknown rather than a guess. The notice names the fix, and offers no
+           button: per the product principles the UI never drives process
+           lifecycle, so starting the core stays the user's call. -->
+      <span class="foot-offline" role="status">
+        No supervisor attached. Start Kandel to see live state.
+      </span>
+    {/if}
   </footer>
 </main>
 
@@ -980,6 +1042,23 @@
     text-align: right;
   }
 
+  /* The disconnected notice. Ink rather than graphite: it is a real state worth
+     reading, not a hint. */
+  .foot-offline {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-8);
+    color: var(--ink);
+    font-weight: var(--w-medium);
+  }
+  .foot-offline::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 9999px;
+    border: 1.5px solid var(--stone);
+  }
+
   /* ── Ledger ─────────────────────────────────────────────────────────────── */
   .ledger-wrap {
     flex: 1;
@@ -1106,6 +1185,13 @@
     background: transparent;
     border-color: var(--stone);
   }
+  /* Unknown: a hollow marker with a dashed ring. Dashes read as "not a solid
+     reading", which is exactly the claim being made, and they stay distinct
+     from both the filled states and the plain hollow "stopped" marker. */
+  .charge-unknown {
+    background: transparent;
+    border: 1px dashed var(--stone);
+  }
 
   .state {
     font-size: var(--text-caption);
@@ -1123,6 +1209,9 @@
     color: var(--alert);
   }
   .state-idle {
+    color: var(--graphite);
+  }
+  .state-unknown {
     color: var(--graphite);
   }
 

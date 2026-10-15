@@ -11,10 +11,10 @@ pnpm dev       # build core + UI, start Vite, then launch the core with -ui
 
 `pnpm dev` runs the core against a repo-local scratch config at `.dev/config.toml`, created on first run and gitignored, so your real `%USERPROFILE%\.config\kandel\config.toml` is never touched. Set `KANDEL_CONFIG` to point at a different file. Ctrl+C stops everything.
 
-Dev builds use a separate single-instance lock from release builds, so a `pnpm dev` core can run at the same time as an installed Kandel. Two dev cores still cannot run together.
+Dev builds use a separate identity from release builds (the single-instance lock, the status pipe, and the tray icon all differ), so a `pnpm dev` core can run at the same time as an installed Kandel without the two colliding. Two dev cores still cannot run together.
 
 > [!NOTE]
-> Use `pnpm dev`, not `tauri dev`. Only the window the core spawns gets the status pipe, so a UI opened by `tauri dev` renders without live state.
+> `pnpm dev` runs Vite and the core together. A UI opened any other way (including `tauri dev`) attaches to the core's status pipe on its own, so it shows live state whenever a core is running.
 
 ## Tests
 

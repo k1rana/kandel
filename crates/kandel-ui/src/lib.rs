@@ -1,12 +1,15 @@
 //! Kandel management UI (Tauri).
 //!
-//! The UI is a disposable process launched on demand by the core. It reads and
-//! writes `config.toml` directly (the single source of truth) and receives
-//! real-time monitor status from the core over stdin as line-delimited JSON.
+//! The UI is a disposable process: it reads and writes `config.toml` directly
+//! (the single source of truth) and receives real-time monitor status from the
+//! core by attaching to the core's named pipe. Attaching (rather than being
+//! handed a stream by whoever launched it) is what lets the UI be opened
+//! directly and reconnect across a core restart.
 
 pub mod chrome;
 pub mod commands;
 pub mod ipc;
+pub mod pipe;
 
 use std::path::PathBuf;
 
@@ -15,10 +18,18 @@ use tauri_plugin_window_state::StateFlags;
 
 /// Runs the Tauri application. `config_path` is the path to `config.toml`.
 ///
-/// `ipc_mode` enables the stdin status listener and the "exit on core exit"
-/// behavior. It is set by the core when it launches the UI as a child process,
-/// and unset for standalone runs such as `tauri dev`.
-pub fn run(config_path: PathBuf, ipc_mode: bool) {
+/// The UI always connects to the core's status pipe, whether the core launched
+/// it or the user opened it directly: the pipe is reconnectable, so both paths
+/// give identical behaviour. See [`ipc::spawn_reader`].
+pub fn run(config_path: PathBuf) {
+    // Shared with the reader thread, and readable by the frontend, so a window
+    // that mounted after the core attached still learns it is connected. Managed
+    // by value: Tauri resolves state by exact type, so `State<'_, ConnectionState>`
+    // only resolves if this exact type was registered. Cloning is cheap (the flag
+    // is behind an `Arc` inside).
+    let connection = ipc::ConnectionState::default();
+    let connection_for_reader = connection.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // Persist and restore the window size/position/maximized state between
@@ -37,6 +48,7 @@ pub fn run(config_path: PathBuf, ipc_mode: bool) {
         )
         .manage(commands::UiState::new(config_path))
         .manage(ipc::StatusCache::default())
+        .manage(connection)
         .invoke_handler(tauri::generate_handler![
             commands::get_about_info,
             commands::open_repository,
@@ -47,6 +59,7 @@ pub fn run(config_path: PathBuf, ipc_mode: bool) {
             commands::select_command_path,
             ipc::get_initial_statuses,
             ipc::get_app_logs,
+            ipc::get_connection_state,
         ])
         .setup(move |app| {
             // Tweak the DWM chrome (remove the Windows 11 accent border, opt
@@ -69,12 +82,11 @@ pub fn run(config_path: PathBuf, ipc_mode: bool) {
                 });
             }
 
-            // In IPC mode, forward core status updates (stdin) to the frontend
-            // as events. Outside IPC mode stdin is not a pipe from the core, so
-            // reading it would see EOF immediately and close the window.
-            if ipc_mode {
-                ipc::spawn_stdin_listener(app.handle().clone());
-            }
+            // Stream status from the core over its named pipe. The reader
+            // reconnects on its own, so a UI opened before the core is ready —
+            // or one that outlives a core restart — still converges to live
+            // state instead of freezing on stale rows.
+            ipc::spawn_reader(app.handle().clone(), connection_for_reader.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

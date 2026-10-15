@@ -1,4 +1,16 @@
-//! Manages the single UI child process and pushes status updates to it.
+//! The core's side of the UI channel: publishing the status stream and
+//! launching/stopping the UI process.
+//!
+//! These are deliberately separate concerns:
+//!
+//! * [`StatusServer`] publishes the core's named pipe and forwards events to
+//!   whichever UI is attached. It does not care *which* process is on the other
+//!   end, which is what makes the stream reconnectable (see [`crate::win::pipe`]).
+//! * [`UiLauncher`] starts and stops the UI executable, so a tray click opens a
+//!   window. The window then attaches to the pipe on its own.
+//!
+//! Framing is newline-delimited JSON, one [`CoreEvent`] per line — unchanged
+//! from the previous stdin transport, so the frontend needs no changes.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -8,53 +20,93 @@ use anyhow::{Context, Result};
 
 use kandel_config::{LogFormat, RuntimeFlags};
 
-use crate::ipc::{CoreEvent, EventWriter};
+use crate::ipc::CoreEvent;
 use crate::logs::LogEvent;
 use crate::status::MonitorStatus;
+use crate::win::pipe::PipeServer;
 
-/// A running UI process and its event writer.
-struct UiProcess {
-    child: Child,
-    writer: EventWriter<std::process::ChildStdin>,
+/// Builds the event stream a freshly attached UI receives, oldest first.
+///
+/// Statuses come first so the ledger is populated before its log panels fill in.
+pub fn snapshot_events(
+    statuses: &[MonitorStatus],
+    logs: &[(String, Vec<LogEvent>)],
+) -> Vec<CoreEvent> {
+    let mut events = Vec::with_capacity(statuses.len() + logs.len());
+    events.extend(statuses.iter().cloned().map(CoreEvent::Status));
+    for (name, events_for_app) in logs {
+        for event in events_for_app {
+            events.push(CoreEvent::Logs {
+                name: name.clone(),
+                event: event.clone(),
+            });
+        }
+    }
+    events
+}
+
+/// Publishes the core's status pipe and serves whichever UI attaches.
+///
+/// `snapshot` is invoked on every attach — initial connect *and* reconnect — so
+/// a late or returning client is never left with an empty ledger.
+pub fn serve(
+    snapshot: impl Fn() -> Vec<CoreEvent> + Send + Sync + 'static,
+) -> StatusServer {
+    let name = crate::win::pipe::local_pipe_name();
+    let server = PipeServer::spawn(name.clone(), Arc::new(snapshot));
+    tracing::info!(component = "ipc", pipe = %name, "status pipe published");
+    StatusServer { server }
+}
+
+/// A handle to the running status server.
+///
+/// Cheap to clone; every clone addresses the same stream.
+#[derive(Clone)]
+pub struct StatusServer {
+    server: PipeServer,
+}
+
+impl StatusServer {
+    /// Sends a status update to the attached UI, if any.
+    pub fn send(&self, status: &MonitorStatus) {
+        self.server.send(&CoreEvent::Status(status.clone()));
+    }
+
+    /// Sends a captured log event for `name` to the attached UI, if any.
+    pub fn send_log(&self, name: &str, event: &LogEvent) {
+        self.server.send(&CoreEvent::Logs {
+            name: name.to_string(),
+            event: event.clone(),
+        });
+    }
 }
 
 /// Launches and tracks the single UI process.
-#[derive(Clone)]
-pub struct UiManager {
-    inner: Arc<Mutex<Option<UiProcess>>>,
+///
+/// The UI is not given a status pipe: it attaches to the core's named pipe
+/// itself. That is why the same executable works whether the core launched it or
+/// the user opened it directly.
+#[derive(Clone, Default)]
+pub struct UiLauncher {
+    child: Arc<Mutex<Option<Child>>>,
 }
 
-impl Default for UiManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl UiManager {
-    /// Creates an empty manager.
+impl UiLauncher {
+    /// Creates an empty launcher.
     pub fn new() -> Self {
-        UiManager {
-            inner: Arc::new(Mutex::new(None)),
-        }
+        Self::default()
     }
 
-    /// Launches the UI if it is not already running, then sends `initial`
-    /// statuses and the current per-app log backlog.
+    /// Launches the UI if it is not already running.
     ///
-    /// The UI executable is expected next to the core binary, named
-    /// `kandel-ui.exe`. Passing `-f`, `-log-file`, and `-log-format` keeps the
-    /// two processes consistent.
-    pub fn show(
-        &self,
-        flags: &RuntimeFlags,
-        initial: &[MonitorStatus],
-        logs: &[(String, Vec<LogEvent>)],
-    ) -> Result<()> {
-        let mut guard = self.inner.lock().unwrap();
+    /// `flags` supplies the config path and log options, so both processes agree
+    /// on which file they are working with.
+    pub fn show(&self, flags: &RuntimeFlags) -> Result<()> {
+        let mut guard = self.child.lock().unwrap();
 
         // Reap a UI that has already exited.
-        if let Some(ui) = guard.as_mut() {
-            if matches!(ui.child.try_wait(), Ok(Some(_))) {
+        if let Some(child) = guard.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
                 *guard = None;
             }
         }
@@ -62,14 +114,12 @@ impl UiManager {
         if guard.is_none() {
             let ui_exe = ui_executable_path();
             let mut command = Command::new(&ui_exe);
-            // `--ipc` tells the UI it is being launched by the core with a
-            // piped stdin, so it should listen for status updates and exit
-            // when the pipe closes.
             command
-                .arg("--ipc")
                 .arg("-f")
                 .arg(&flags.config_path)
-                .stdin(Stdio::piped())
+                // The UI is an independent process now: it must not inherit the
+                // core's standard handles or it would keep a console alive.
+                .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             if let Some(log_file) = &flags.log_file {
@@ -81,62 +131,20 @@ impl UiManager {
             };
             command.arg("-log-format").arg(format);
 
-            let mut child = command
+            let child = command
                 .spawn()
                 .with_context(|| format!("launching UI process {}", ui_exe.display()))?;
-            let stdin = child.stdin.take().context("taking UI stdin")?;
-            *guard = Some(UiProcess {
-                child,
-                writer: EventWriter::new(stdin),
-            });
-        }
-
-        if let Some(ui) = guard.as_mut() {
-            for status in initial {
-                let _ = ui.writer.send(&CoreEvent::Status(status.clone()));
-            }
-            for (name, events) in logs {
-                for event in events {
-                    let _ = ui.writer.send(&CoreEvent::Logs {
-                        name: name.clone(),
-                        event: event.clone(),
-                    });
-                }
-            }
+            *guard = Some(child);
         }
 
         Ok(())
     }
 
-    /// Sends a status update to the UI, ignoring the case where no UI is running.
-    pub fn send(&self, status: &MonitorStatus) {
-        self.send_event(&CoreEvent::Status(status.clone()));
-    }
-
-    /// Sends a captured log event for `name`, ignoring the case where no UI is
-    /// running.
-    pub fn send_log(&self, name: &str, event: &LogEvent) {
-        self.send_event(&CoreEvent::Logs {
-            name: name.to_string(),
-            event: event.clone(),
-        });
-    }
-
-    fn send_event(&self, event: &CoreEvent) {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(ui) = guard.as_mut() {
-            if ui.writer.send(event).is_err() {
-                // Writing to a closed pipe means the UI exited; drop it.
-                *guard = None;
-            }
-        }
-    }
-
     /// Returns true when a UI process is currently being tracked.
     pub fn is_running(&self) -> bool {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(ui) = guard.as_mut() {
-            if matches!(ui.child.try_wait(), Ok(Some(_))) {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(child) = guard.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
                 *guard = None;
                 return false;
             }
@@ -147,10 +155,10 @@ impl UiManager {
 
     /// Terminates the tracked UI process, if any.
     pub fn shutdown(&self) {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(mut ui) = guard.take() {
-            let _ = ui.child.kill();
-            let _ = ui.child.wait();
+        let mut guard = self.child.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -170,7 +178,20 @@ pub fn ui_executable_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logs::STREAM_STDOUT;
     use crate::status::AppState;
+
+    fn status(name: &str) -> MonitorStatus {
+        MonitorStatus {
+            name: name.into(),
+            state: AppState::Running,
+            pid: 1,
+            enabled: true,
+            command: "cmd.exe".into(),
+            args: vec![],
+            restart_count: 0,
+        }
+    }
 
     #[test]
     fn ui_executable_sits_next_to_core() {
@@ -183,23 +204,31 @@ mod tests {
     }
 
     #[test]
-    fn send_without_ui_is_a_noop() {
-        let manager = UiManager::new();
-        manager.send(&MonitorStatus {
-            name: "a".into(),
-            state: AppState::Running,
-            pid: 1,
-            enabled: true,
-            command: "cmd.exe".into(),
-            args: vec![],
-            restart_count: 0,
-        });
-        manager.send_log("a", &crate::logs::LogEvent::Started { ts: 1 });
-        assert!(!manager.is_running());
+    fn snapshot_puts_statuses_before_logs() {
+        let statuses = vec![status("api")];
+        let logs = vec![(
+            "api".to_string(),
+            vec![LogEvent::Line {
+                ts: 1,
+                stream: STREAM_STDOUT.into(),
+                text: "boot".into(),
+            }],
+        )];
+
+        let events = snapshot_events(&statuses, &logs);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], CoreEvent::Status(_)));
+        assert!(matches!(events[1], CoreEvent::Logs { .. }));
+    }
+
+    #[test]
+    fn snapshot_of_nothing_is_empty() {
+        assert!(snapshot_events(&[], &[]).is_empty());
     }
 
     #[test]
     fn shutdown_without_ui_is_a_noop() {
-        UiManager::new().shutdown();
+        UiLauncher::new().shutdown();
+        assert!(!UiLauncher::new().is_running());
     }
 }

@@ -2,6 +2,7 @@
 
 pub mod cmdline;
 pub mod console;
+pub mod pipe;
 pub mod process;
 pub mod window;
 

@@ -34,9 +34,11 @@ use windows::Win32::UI::Shell::{
 ///
 /// The tray icon is registered with this GUID (see `tray.rs`), so the balloon
 /// below can address it by identity instead of by the crate's private counter
-/// id. The value is arbitrary but must never change: it is what Windows keys the
-/// icon on.
-pub const TRAY_GUID: u128 = 0x6f1c8b2e_7a4d_4f3a_9c1e_2b8d5a7f0c31;
+/// id. It is profile-scoped, so a dev core and an installed core (which may run
+/// at the same time) keep separate icons; see [`kandel_config::tray_guid`].
+pub fn tray_guid() -> u128 {
+    kandel_config::tray_guid()
+}
 
 /// How prominently a notice should read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,13 +159,13 @@ impl Notifier {
     }
 }
 
-/// Sends one balloon for the tray icon identified by [`TRAY_GUID`].
+/// Sends one balloon for the tray icon identified by [`tray_guid`].
 fn show(hwnd: *mut std::ffi::c_void, severity: Severity, title: &str, body: &str) {
     let mut data = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: HWND(hwnd),
         uFlags: NIF_INFO | NIF_GUID,
-        guidItem: GUID::from_u128(TRAY_GUID),
+        guidItem: GUID::from_u128(tray_guid()),
         dwInfoFlags: severity.info_flags(),
         ..Default::default()
     };

@@ -5,9 +5,10 @@
  *
  * Tauri's only dev hook is `beforeDevCommand`, which runs the *frontend* dev
  * server. It cannot also manage a second native process, and Kandel genuinely
- * needs one: the core pushes live status to the UI over a stdin pipe, so
- * statuses only reach the window the *core* spawns. `tauri dev` opens its own
- * window, which has no pipe and therefore never shows live state.
+ * needs one: the UI reads live status from the core's named pipe (the core
+ * publishes it and any UI window attaches), which in dev has to come from the
+ * core the script starts — so the tray and the status stream both belong to
+ * that process, not to `tauri dev`'s own window.
  *
  * So dev needs two long-running processes:
  *   1. Vite, serving the frontend with hot reload (the core's UI loads it via

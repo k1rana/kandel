@@ -4,7 +4,9 @@
 //!
 //! * `${NAME}` — replaced by the value returned from the lookup function.
 //! * `$$` — produces a literal `$`.
-//! * A lone `$` (not followed by `$` or `{`) is a syntax error.
+//! * Any other `$` is a literal `$`. Only `${` begins a placeholder, so a bare
+//!   `$` (a regex anchor like `^(a|b)$`, a price, or an unbraced `$HOME`) needs
+//!   no escaping.
 //! * An unterminated `${` is a syntax error.
 //! * An empty `${}` is a syntax error.
 //!
@@ -14,14 +16,6 @@
 /// Error produced by [`expand`] and friends.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpandError {
-    /// A `$` appeared at the very end of the input.
-    #[error("unescaped $ at end of input (use $$ for a literal dollar sign)")]
-    TrailingDollar,
-    /// A `$` appeared before a character that is neither `$` nor `{`.
-    #[error(
-        "unescaped $ before {0:?} (use $$ for a literal dollar sign, or ${{NAME}} for a variable)"
-    )]
-    LoneDollar(char),
     /// A `${` was not terminated by `}`.
     #[error("unterminated ${{ in input")]
     UnterminatedBrace,
@@ -53,31 +47,34 @@ where
             continue;
         }
 
-        if i + 1 >= bytes.len() {
-            return Err(ExpandError::TrailingDollar);
+        // A `$` is only special as `$$` (a literal dollar) or `${...}` (a
+        // placeholder). Anywhere else it is literal, so a regex anchor such as
+        // `^(a|b)$` or an unbraced `$HOME` needs no escaping.
+        match bytes.get(i + 1).copied() {
+            Some(b'$') => {
+                out.push(b'$');
+                i += 2;
+            }
+            Some(b'{') => {
+                // ${...}
+                let rest = &bytes[i + 2..];
+                let Some(end) = rest.iter().position(|&b| b == b'}') else {
+                    return Err(ExpandError::UnterminatedBrace);
+                };
+                let name = std::str::from_utf8(&rest[..end])
+                    .map_err(|_| ExpandError::UnterminatedBrace)?;
+                if name.is_empty() {
+                    return Err(ExpandError::EmptyBraces);
+                }
+                let value = lookup(name).ok_or_else(|| ExpandError::Undefined(name.to_string()))?;
+                out.extend_from_slice(value.as_bytes());
+                i += 2 + end + 1;
+            }
+            _ => {
+                out.push(b'$');
+                i += 1;
+            }
         }
-        let next = bytes[i + 1];
-        if next == b'$' {
-            out.push(b'$');
-            i += 2;
-            continue;
-        }
-        if next != b'{' {
-            return Err(ExpandError::LoneDollar(next as char));
-        }
-
-        // ${...}
-        let rest = &bytes[i + 2..];
-        let Some(end) = rest.iter().position(|&b| b == b'}') else {
-            return Err(ExpandError::UnterminatedBrace);
-        };
-        let name = std::str::from_utf8(&rest[..end]).map_err(|_| ExpandError::UnterminatedBrace)?;
-        if name.is_empty() {
-            return Err(ExpandError::EmptyBraces);
-        }
-        let value = lookup(name).ok_or_else(|| ExpandError::Undefined(name.to_string()))?;
-        out.extend_from_slice(value.as_bytes());
-        i += 2 + end + 1;
     }
 
     // Input plus inserted lookup values are both valid UTF-8, so this is infallible.
@@ -206,16 +203,16 @@ mod tests {
     }
 
     #[test]
-    fn lone_dollar_error() {
-        assert!(expand("price $5", none).is_err());
+    fn bare_dollar_is_literal() {
+        assert_eq!(expand("price $5", none).unwrap(), "price $5");
+        assert_eq!(expand("trailing$", none).unwrap(), "trailing$");
+        assert_eq!(expand("$HOME", none).unwrap(), "$HOME");
     }
 
     #[test]
-    fn dollar_at_end_error() {
-        assert_eq!(
-            expand("trailing$", none).unwrap_err(),
-            ExpandError::TrailingDollar
-        );
+    fn regex_anchor_is_literal() {
+        let regex = "^(alpha|beta_.*|gamma)$";
+        assert_eq!(expand(regex, none).unwrap(), regex);
     }
 
     #[test]
@@ -255,8 +252,13 @@ mod tests {
 
     #[test]
     fn validate_template_catches_syntax_errors() {
-        assert!(validate_template("oops $", false).is_err());
         assert!(validate_template("${unterminated", false).is_err());
         assert!(validate_template("${}", false).is_err());
+    }
+
+    #[test]
+    fn validate_template_allows_bare_dollar() {
+        assert!(validate_template("oops $", false).is_ok());
+        assert!(validate_template("^(a|b)$", false).is_ok());
     }
 }

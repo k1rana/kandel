@@ -151,7 +151,7 @@ The visual system is documented in [`DESIGN.md`](./DESIGN.md).
 
 - `${NAME}` expands to the value of the environment variable `NAME`. An undefined `NAME` is an error.
 - `${PID}` expands to the monitored process PID. **Only valid inside `stop_args`.**
-- `$$` produces a literal `$`.
+- `$$` produces a literal `$`. Any other `$` is also literal (only `${` starts a placeholder), so a regex anchor like `^(a|b)$` or a literal `$HOME` needs no escaping.
 
 On Windows, prefer TOML literal strings (single-quoted) so backslashes don't need escaping:
 

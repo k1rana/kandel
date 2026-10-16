@@ -5,14 +5,31 @@
 //! `CreateProcessW` is built by escaping the executable and each argument and
 //! joining them with spaces.
 
+/// `cmd.exe` metacharacters that are only special when the command line is
+/// re-parsed by `cmd.exe` rather than by `CommandLineToArgvW`.
+///
+/// `CreateProcessW` re-parses a `.cmd`/`.bat` target through `cmd.exe`; that is
+/// exactly what happens for the `npx.cmd`/`npm.cmd` shims. Quoting an argument
+/// that contains any of these makes `cmd.exe` treat them literally instead of
+/// as redirection, pipes, or grouping.
+const CMD_METACHARS: &str = "&|<>^()";
+
 /// Quotes a single argument for inclusion in a Windows command line.
 ///
 /// * An empty string becomes `""`.
-/// * A string with no spaces, tabs, or quotes is returned unchanged.
+/// * A string with no spaces, tabs, quotes, or `cmd.exe` metacharacters is
+///   returned unchanged.
 /// * Otherwise the string is wrapped in double quotes, and runs of backslashes
 ///   immediately before a quote or the closing quote are doubled.
+///
+/// The `cmd.exe` metacharacter rule guards the case where the command line is
+/// re-parsed by `cmd.exe` (a batch target such as `npx.cmd`) rather than by
+/// `CommandLineToArgvW`. Quoting is harmless for a real executable, where
+/// `CommandLineToArgvW` strips the surrounding quotes again.
 pub fn escape_arg(arg: &str) -> String {
-    let needs_quote = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
+    let needs_quote = arg.is_empty()
+        || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"')
+        || arg.chars().any(|c| CMD_METACHARS.contains(c));
 
     if !needs_quote {
         return arg.to_string();
@@ -114,6 +131,33 @@ mod tests {
     #[test]
     fn tab_is_quoted() {
         assert_eq!(escape_arg("a\tb"), "\"a\tb\"");
+    }
+
+    #[test]
+    fn cmd_metachars_are_quoted() {
+        // These are only special when `cmd.exe` re-parses the line (a `.cmd`
+        // target such as `npx.cmd`); quoting makes cmd treat them literally.
+        assert_eq!(escape_arg("a|b"), r#""a|b""#);
+        assert_eq!(escape_arg("a&b"), r#""a&b""#);
+        assert_eq!(escape_arg("a<b>c"), r#""a<b>c""#);
+        assert_eq!(escape_arg("^(a)$"), r#""^(a)$""#);
+    }
+
+    #[test]
+    fn regex_arg_is_quoted_for_batch_shim() {
+        // A regex with alternation and an anchor has no space/tab/quote, so it
+        // would previously go out unquoted and be split into a pipe by cmd.exe.
+        let arg = "--pattern=^(alpha|beta|gamma_.*)$".to_string();
+        assert_eq!(
+            build_command_line("app.cmd", &[arg]),
+            r#"app.cmd "--pattern=^(alpha|beta|gamma_.*)$""#
+        );
+    }
+
+    #[test]
+    fn dollar_without_metachar_stays_unquoted() {
+        // `$` is not a cmd metacharacter and must not force quoting on its own.
+        assert_eq!(escape_arg("price=$5"), "price=$5");
     }
 
     #[test]

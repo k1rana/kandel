@@ -237,4 +237,44 @@ mod tests {
         supervisor.stop_all();
         assert!(supervisor.all_statuses().is_empty());
     }
+
+    #[test]
+    fn stop_all_stops_console_apps_in_parallel() {
+        // Each console app here ignores CTRL_BREAK, so every stop burns the full
+        // `stop_timeout_sec` before the forced fallback. If the process-wide
+        // console lock were held across that wait, N apps would cost N timeouts;
+        // with it released after the signal, they overlap and cost one.
+        let (cb, _rx) = collecting_callback();
+        let supervisor =
+            Supervisor::new(cb, Arc::new(Notifier::new()), Arc::new(LogStore::default()));
+
+        let app = |name: &str| App {
+            name: name.into(),
+            command: "cmd.exe".into(),
+            args: vec!["/c".into(), "ping -n 60 127.0.0.1 > nul".into()],
+            hide_window: true,
+            stop_timeout_sec: 2,
+            restart_delay_sec: 0,
+            ..App::default()
+        };
+
+        let mut desired = BTreeMap::new();
+        for name in ["a", "b", "c", "d"] {
+            desired.insert(name.to_string(), app(name));
+        }
+        supervisor.reconcile(desired);
+        // Let every child reach Running before stopping.
+        std::thread::sleep(Duration::from_millis(1200));
+
+        let start = Instant::now();
+        supervisor.stop_all();
+        let elapsed = start.elapsed();
+
+        // Parallel: ~one timeout (plus overhead). Serial would be ~four. The 3x
+        // timeout bound sits well clear of both.
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "stop_all serialized console stops: {elapsed:?}"
+        );
+    }
 }

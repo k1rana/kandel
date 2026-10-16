@@ -32,9 +32,10 @@ static CONSOLE_ATTACH_MU: Mutex<()> = Mutex::new(());
 /// Attaches to the target child's console and posts `CTRL_BREAK_EVENT` to the
 /// child's process group.
 ///
-/// Returns a cleanup guard that **must** be dropped only after the child has
-/// exited (or the caller's timeout has elapsed); detaching from the console
-/// earlier can cause the event to be lost.
+/// Returns a cleanup guard. Drop it as soon as the event has been posted: the
+/// event is already queued in the child's process group, and the guard holds a
+/// process-wide console lock, so keeping it across a wait serializes every
+/// other console stop behind this one.
 pub fn send_ctrl_break(pid: u32) -> Result<ConsoleGuard> {
     let guard = CONSOLE_ATTACH_MU
         .lock()

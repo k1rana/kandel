@@ -376,11 +376,12 @@ pub fn stop_process(cfg: &App, child: &ChildProcess) -> Result<()> {
 
     match console::send_ctrl_break(child.pid) {
         Ok(guard) => {
-            let result = wait_or_terminate(child, timeout);
-            // The guard detaches from the console only now, after the child has
-            // exited or the timeout elapsed.
+            // Detach immediately: the break event is already queued to the
+            // child's process group, and holding the process-wide console lock
+            // across the wait would serialize every other console stop on this
+            // one, turning an N-app shutdown into N timeouts.
             drop(guard);
-            result
+            wait_or_terminate(child, timeout)
         }
         Err(e) => {
             tracing::warn!(

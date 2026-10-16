@@ -114,6 +114,7 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
     // Tray loop (blocks until quit).
     let supervisor_for_quit = Arc::clone(&supervisor);
     let ui_for_open = ui.clone();
+    let ui_for_quit = ui.clone();
     let flags_for_open = flags.clone();
     let config_path_for_config = config_path.clone();
 
@@ -140,6 +141,11 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
             }),
             on_quit: Box::new(move || {
                 tracing::info!(component = "main", "quit requested, stopping all monitors");
+                // Close the window first: stopping monitors can take seconds per
+                // app (graceful stop, then a forced fallback), and a hung window
+                // during that wait reads as a frozen quit. It is also killed
+                // again, harmlessly, by the shutdown below the tray loop.
+                ui_for_quit.shutdown();
                 supervisor_for_quit.stop_all();
             }),
         },

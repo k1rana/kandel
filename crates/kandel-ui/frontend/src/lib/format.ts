@@ -30,6 +30,123 @@ export function sanitizeEnvKey(name: string): string {
   return name.replace(/\s/g, "_");
 }
 
+/* ── Environment bulk text ──────────────────────────────────────────────────
+
+   The editor's bulk mode is a plain-text view of the same pairs the row editor
+   holds. Parsing mirrors what a shell or a .env loader accepts, kept more
+   forgiving than strict dotenv: pasted output from `export`, `set`, or a .env
+   file should all land without hand-cleaning.
+
+   One line, one variable. Values are kept verbatim (they may contain `=` and
+   spaces); a quoting wrapper is stripped only when it actually wraps the whole
+   value, so `X="a"-"b"` stays as written. Names with interior whitespace are
+   folded to `_` here — the bulk view is the paste/hand-edit surface, where the
+   row editor's sanitizer does not run, and a folded name cannot be mistaken
+   for acceptance of an invalid name. A reference to another variable
+   (`${PORT}`) is deliberately NOT interpolated: `config.toml` is the template
+   of record and the core resolves it at launch, so the text view and the row
+   view must show the same literal characters. */
+
+/** A single unparsable line in bulk text. */
+export interface EnvTextIssue {
+  /** 1-based line number in the text. */
+  line: number;
+  /** What is wrong with that line. */
+  message: string;
+}
+
+/** The result of parsing bulk environment text. */
+export interface EnvParseResult {
+  /** Pairs derived from the parseable lines, in source order. */
+  pairs: EnvVar[];
+  /** One issue per line that could not be parsed. */
+  issues: EnvTextIssue[];
+}
+
+/** True when the value must be single-quoted to survive a round trip through
+ * the text view. */
+function valueNeedsQuotes(value: string): boolean {
+  return value !== value.trim() || /\s/.test(value) || /^["'#]/.test(value);
+}
+
+/** Serializes pairs into the bulk text view.
+ *
+ * Plain values stay bare so the common case reads exactly as the user wrote
+ * it: `PORT=3000`. Values that a bare form would corrupt on re-parse (leading
+ * quote, leading comment marker, whitespace) are single-quoted, which
+ * {@link envFromText} strips back symmetrically. */
+export function envToText(pairs: EnvVar[]): string {
+  return pairs
+    .filter((pair) => !(pair.key.trim() === "" && pair.value === ""))
+    .map((pair) => {
+      if (pair.value !== "" && valueNeedsQuotes(pair.value)) {
+        return `${pair.key}='${pair.value.replace(/'/g, "\\'")}'`;
+      }
+      return `${pair.key}=${pair.value}`;
+    })
+    .join("\n");
+}
+
+/** A `KEY` alone — which this surface treats as a variable set to the empty
+ * string — optionally wearing an `export` or `set` prefix. */
+const BARE_KEY_RE = /^(?:export\s+|set\s+)?([A-Za-z_][\w.-]*)$/;
+
+/** Parses the bulk text view back into pairs.
+ *
+ * Unparseable lines are reported, not swallowed: `issues` carries one entry
+ * per bad line and the editor blocks saving while any remain. Parseable lines
+ * still yield pairs, so work the user has already typed is never lost. */
+export function envFromText(text: string): EnvParseResult {
+  const pairs: EnvVar[] = [];
+  const issues: EnvTextIssue[] = [];
+
+  text.split(/\n/).forEach((raw, index) => {
+    const line = raw.replace(/\r$/, "").trim();
+    if (line === "" || /^[;#]/.test(line)) return;
+
+    let body = line.replace(/^(export|set)\s+/, "");
+    const eq = body.indexOf("=");
+
+    if (eq === -1) {
+      const bare = BARE_KEY_RE.exec(body);
+      if (bare) {
+        pairs.push({ key: sanitizeEnvKey(bare[1]), value: "" });
+        return;
+      }
+      issues.push({
+        line: index + 1,
+        message: "use NAME=value — this line has no '='",
+      });
+      return;
+    }
+
+    const name = body.slice(0, eq).trim();
+    if (!name) {
+      // A bare '=' is what an untouched "Add variable" row serializes to; it
+      // carries no data, so it is skipped the way a blank line would be. A
+      // name with a value, though, is a real mistake and stays an issue.
+      if (body.slice(eq + 1).trim() === "") return;
+      issues.push({ line: index + 1, message: "the name before '=' is empty" });
+      return;
+    }
+
+    body = body.slice(eq + 1).trim();
+    let value = body;
+    // Unwrap ONE quoting wrapper, symmetric with envToText. Single quotes are
+    // the serializer's own mechanism, so their contents are kept verbatim
+    // (only the \' escape is honored); a double-quote wrapper is a user's
+    // pasting convention and its escapes are folded back to bare chars.
+    if (value.length >= 2 && ((value[0] === '"' && value.endsWith('"')) || (value[0] === "'" && value.endsWith("'")))) {
+      if (value[0] === "'") value = value.slice(1, -1).replace(/\\'/g, "'");
+      else value = value.slice(1, -1).replace(/\\"/g, '"');
+    }
+
+    pairs.push({ key: sanitizeEnvKey(name), value });
+  });
+
+  return { pairs, issues };
+}
+
 /** Formats an event timestamp as wall-clock `HH:MM:SS`. */
 export function formatClock(ts: number): string {
   const d = new Date(ts);

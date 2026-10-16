@@ -4,6 +4,8 @@ import {
   applyStateUpdate,
   caseInsensitiveComparator,
   clampInt,
+  envFromText,
+  envToText,
   extractAppNameFromPath,
   formatClock,
   formatCommandLine,
@@ -31,6 +33,184 @@ function status(overrides: Partial<AppStateInfo> = {}): AppStateInfo {
     ...overrides,
   };
 }
+
+describe("envToText", () => {
+  it("renders one KEY=value line per pair in order", () => {
+    expect(envToText([{ key: "PORT", value: "3000" }, { key: "A", value: "1" }])).toBe(
+      "PORT=3000\nA=1",
+    );
+  });
+
+  it("returns an empty string for no pairs", () => {
+    expect(envToText([])).toBe("");
+  });
+
+  it("skips untouched placeholder rows, which carry no data", () => {
+    expect(
+      envToText([
+        { key: "PORT", value: "3000" },
+        { key: "", value: "" },
+        { key: "   ", value: "" },
+      ]),
+    ).toBe("PORT=3000");
+  });
+
+  it("keeps a value containing = verbatim", () => {
+    expect(envToText([{ key: "TOKEN", value: "a=b=c" }])).toBe("TOKEN=a=b=c");
+  });
+
+  it("escapes a leading quote in the value", () => {
+    // A value that starts with a quote would be re-read as a quoting wrapper
+    // by the parser, so it is single-quoted (contents verbatim — the value's
+    // own quotes are NOT escaped, the parser keeps single-quoted bodies verbatim).
+    expect(envToText([{ key: "X", value: '"hi"' }])).toBe("X='\"hi\"'");
+    expect(envToText([{ key: "Y", value: "it's here" }])).toBe("Y='it\\'s here'");
+  });
+
+  it("escapes a leading pound sign in the value", () => {
+    expect(envToText([{ key: "COLOR", value: "#fff" }])).toBe("COLOR='#fff'");
+  });
+
+  it("single-quotes a value with trailing or interior whitespace", () => {
+    expect(envToText([{ key: "A", value: " spaced " }])).toBe("A=' spaced '");
+    expect(envToText([{ key: "B", value: "two words" }])).toBe("B='two words'");
+  });
+
+  it("leaves plain values bare", () => {
+    expect(envToText([{ key: "C", value: "plain" }])).toBe("C=plain");
+  });
+});
+
+describe("envFromText", () => {
+  it("parses one KEY=value per line and keeps order", () => {
+    expect(envFromText("PORT=3000\nTOKEN=a=b\n")).toEqual({
+      pairs: [
+        { key: "PORT", value: "3000" },
+        { key: "TOKEN", value: "a=b" },
+      ],
+      issues: [],
+    });
+  });
+
+  it("trims the key and surrounding spaces around the =", () => {
+    expect(envFromText("  PORT = 3000  ")).toEqual({
+      pairs: [{ key: "PORT", value: "3000" }],
+      issues: [],
+    });
+  });
+
+  it("folds whitespace in a name to underscores", () => {
+    expect(envFromText("MY VAR=1")).toEqual({
+      pairs: [{ key: "MY_VAR", value: "1" }],
+      issues: [],
+    });
+  });
+
+  it("returns empty for blank input and for blank/comment lines only", () => {
+    expect(envFromText("")).toEqual({ pairs: [], issues: [] });
+    expect(envFromText("\n\r\n")).toEqual({ pairs: [], issues: [] });
+    expect(envFromText("# a comment\n; also a comment\n")).toEqual({ pairs: [], issues: [] });
+  });
+
+  it("skips comment lines between entries", () => {
+    expect(envFromText("A=1\n# note\nB=2")).toEqual({
+      pairs: [
+        { key: "A", value: "1" },
+        { key: "B", value: "2" },
+      ],
+      issues: [],
+    });
+  });
+
+  it("strips an optional export or set prefix", () => {
+    expect(envFromText("export PATH=/bin\nset NODE_ENV=test")).toEqual({
+      pairs: [
+        { key: "PATH", value: "/bin" },
+        { key: "NODE_ENV", value: "test" },
+      ],
+      issues: [],
+    });
+  });
+
+  it("strips a matching surrounding double-quote pair", () => {
+    // A single-quoted wrapper is kept verbatim inside a double-quote wrapper.
+    expect(envFromText('X="a=b \'quoted\'"')).toEqual({
+      pairs: [{ key: "X", value: "a=b 'quoted'" }],
+      issues: [],
+    });
+  });
+
+  it("strips a matching surrounding single-quote pair and quotes are otherwise kept", () => {
+    const input = "X='it\\'s'\nY='keep \"end\"'";
+    expect(envFromText(input)).toEqual({
+      pairs: [
+        { key: "X", value: "it's" },
+        { key: "Y", value: 'keep "end"' },
+      ],
+      issues: [],
+    });
+  });
+
+  it("treats a bare KEY as a variable set to the empty string", () => {
+    expect(envFromText("EMPTY\nset EMPTY2")).toEqual({
+      pairs: [
+        { key: "EMPTY", value: "" },
+        { key: "EMPTY2", value: "" },
+      ],
+      issues: [],
+    });
+  });
+
+  it("reports the first malformed line with its line number", () => {
+    const result = envFromText("A=1\n=oops\nB=2");
+    expect(result.issues).toEqual([
+      { line: 2, message: "the name before '=' is empty" },
+    ]);
+    expect(result.pairs.length).toBeGreaterThan(0);
+  });
+
+  it("collects several issues and pairs what it can", () => {
+    const result = envFromText("A=1\nno equals sign here\nB=2");
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].line).toBe(2);
+    expect(result.issues[0].message).toContain("NAME=value");
+    expect(result.pairs).toEqual([
+      { key: "A", value: "1" },
+      { key: "B", value: "2" },
+    ]);
+  });
+
+  it("reports a name that is only whitespace", () => {
+    const result = envFromText("   =1");
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].line).toBe(1);
+  });
+
+  it("skips a bare '=' as the render of an untouched empty row", () => {
+    // envToText of a blank placeholder row emits '='; it has no data, so it
+    // must not block the switch the way a malformed line would.
+    expect(envFromText("=")).toEqual({ pairs: [], issues: [] });
+    expect(envFromText("A=1\n=\nB=2")).toEqual({
+      pairs: [
+        { key: "A", value: "1" },
+        { key: "B", value: "2" },
+      ],
+      issues: [],
+    });
+  });
+
+  it("round-trips through envToText", () => {
+    const pairs = [
+      { key: "PORT", value: "3000" },
+      { key: "TOKEN", value: "a=b" },
+      { key: "NOTES", value: "two words" },
+      { key: "QUOTED", value: "it's" },
+      { key: "HASH", value: "#fff" },
+      { key: "TEMPLATE", value: "${OTHER_VAR}" },
+    ];
+    expect(envFromText(envToText(pairs)).pairs).toEqual(pairs);
+  });
+});
 
 describe("normalizeEnv", () => {
   it("trims names and keeps values verbatim", () => {

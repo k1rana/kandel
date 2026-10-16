@@ -15,6 +15,8 @@
   import {
     applyStateUpdate,
     clampInt,
+    envFromText,
+    envToText,
     extractAppNameFromPath,
     formatClock,
     formatCommandLine,
@@ -26,10 +28,11 @@
     sanitizeEnvKey,
     stateView,
     summarize,
+    type EnvTextIssue,
     type LogRow,
   } from "./lib/format";
   import { onLogUpdate, getAppLogs } from "./lib/api";
-  import { makeEmptyForm, type AppConfig, type AppStateInfo, type LogEvent } from "./lib/types";
+  import { makeEmptyForm, type AppConfig, type AppStateInfo, type EnvVar, type LogEvent } from "./lib/types";
   import ResizeHandles from "./lib/ResizeHandles.svelte";
   import Titlebar from "./lib/Titlebar.svelte";
   import { isWindowMaximized, onWindowResized } from "./lib/window";
@@ -101,7 +104,7 @@
     applyCurrentTheme();
   }
 
-  // ── Editor state ─────────────────────────────────────────────────────────
+  // ── Editor state ──────────────────────────────---────────────────────────
   let editorOpen = $state(false);
   let isCreateMode = $state(false);
   let confirmDelete = $state(false);
@@ -111,6 +114,17 @@
   let errorMessage = $state("");
   let editingOriginalName = $state("");
   let editForm = $state<AppConfig>(makeEmptyForm());
+
+  /** Which rendering the Environment section is edited through. */
+  type EnvEditMode = "rows" | "text";
+  // How the Environment section is edited. "rows" is the one-variable-per-field
+  // editor; "text" is the same list rendered as one NAME=value line per row, so
+  // many variables can be pasted, edited, and read in one glance. Both views
+  // hold the same pairs — switching never rewrites them; only saving persists.
+  let envEditMode = $state<EnvEditMode>("rows");
+  let envTextInput = $state("");
+  // Issues from parsing the bulk text; while any exist, saving is blocked.
+  let envIssues = $state<EnvTextIssue[]>([]);
 
   let panelEl = $state<HTMLDivElement | null>(null);
   let nameInputEl = $state<HTMLInputElement | null>(null);
@@ -334,6 +348,9 @@
     confirmDelete = false;
     isSaving = false;
     isCreateMode = false;
+    // A fresh open never resumes another entry's half-edited bulk text.
+    envEditMode = "rows";
+    envIssues = [];
     getFullConfig()
       .then((configs) => {
         const cfg = configs[appName];
@@ -357,6 +374,7 @@
     isCreateMode = true;
     editingOriginalName = "";
     editForm = makeEmptyForm();
+    envEditMode = "rows";
     showEditor();
   }
 
@@ -377,7 +395,7 @@
     lastFocused = null;
   }
 
-  // ── Environment rows ──────────────────────────────────────────────────────
+  // ── Environment rows ──────────────────────────────────────────────────
 
   /** Appends an empty pair and focuses its name field on the next tick. */
   async function addEnvRow() {
@@ -389,6 +407,44 @@
 
   function removeEnvRow(index: number) {
     editForm.env = editForm.env.filter((_, i) => i !== index);
+  }
+
+  /** Switches the Environment section to the bulk text view.
+   *
+   * The text is a plain rendering of the rows the form already holds, so the
+   * two views can never disagree about what is in the form: switching does not
+   * rewrite pairs, only rendering. */
+  function showEnvText() {
+    envIssues = [];
+    envTextInput = envToText(editForm.env);
+    envEditMode = "text";
+  }
+
+  /** Switches back to the row view, holding whatever the text parses to.
+   *
+   * If any line is unparsable the switch does not happen: the text view keeps
+   * the problems on display, so saving can never drop content the user typed
+   * on a technicality. */
+  function showEnvRows() {
+    const result = envFromText(envTextInput);
+    if (result.issues.length > 0) {
+      envIssues = result.issues;
+      return;
+    }
+    envIssues = [];
+    envTextInput = "";
+    envEditMode = "rows";
+    editForm.env = result.pairs.map((pair) => ({ ...pair }));
+    // Land the cursor where the user's next work happens: an empty list wants
+    // a row to fill; an existing list needs no special treatment.
+    if (editForm.env.length === 0) {
+      void addEnvRow();
+    }
+  }
+
+  /** Re-parses the bulk text so the issue list tracks the current content. */
+  function onEnvTextInput() {
+    envIssues = envEditMode === "text" ? envFromText(envTextInput).issues : [];
   }
 
   /** Keeps Tab focus inside the dialog while it is open. */
@@ -528,13 +584,25 @@
       errorMessage = "A command is required — pick or type the executable to run.";
       return;
     }
+    // The bulk text that is not parseable must not be silently dropped.
+    if (envEditMode === "text") {
+      const result = envFromText(envTextInput);
+      if (result.issues.length > 0) {
+        envIssues = result.issues;
+        errorMessage = `Fix the highlighted lines first: ${result.issues[0].message}`;
+        return;
+      }
+      // Text mode is still the live view: adopt what it parses right now,
+      // regardless of whether the user toggled back to rows or not.
+      editForm.env = result.pairs.map((pair) => ({ ...pair }));
+    }
 
     const unnamed = editForm.env.some((pair) => !pair.key.trim() && pair.value.trim() !== "");
     if (unnamed) {
-      errorMessage = "Give every environment variable a name before the \"=\".";
+      errorMessage = 'Every variable needs a name before the "=".';
       return;
     }
-    const env = normalizeEnv(editForm.env);
+    const env: EnvVar[] = normalizeEnv(editForm.env);
 
     isSaving = true;
     errorMessage = "";
@@ -786,15 +854,45 @@
             <input class="inp" bind:value={editForm.cwd} placeholder="Defaults to the command's folder" />
           </label>
 
-          <div class="divider span2">
+          <div class="divider span2 env-divider">
             <span>Environment <em>optional</em></span>
+            <button
+              class="env-mode"
+              type="button"
+              aria-pressed={envEditMode === "text"}
+              aria-label="Bulk edit environment variables as text"
+              onclick={envEditMode === "text" ? showEnvRows : showEnvText}
+            >
+              <span class="env-track" aria-hidden="true">
+                <span class="env-thumb"></span>
+              </span>
+              Bulk edit
+            </button>
           </div>
 
           <div class="field span2">
-            <span class="lbl">
-              Variables <em>added for this app; values may use {"${VAR}"}</em>
-            </span>
-            {#if editForm.env.length === 0}
+            {#if envEditMode === "text"}
+              <textarea
+                class="inp env-textarea"
+                bind:value={envTextInput}
+                oninput={onEnvTextInput}
+                rows={Math.max(4, envTextInput.split("\n").length + 1)}
+                spellcheck="false"
+                autocapitalize="off"
+                autocomplete="off"
+                aria-label="Environment variables, one NAME=value per line"
+                placeholder={"PORT=3000\nNODE_ENV=production"}
+              ></textarea>
+              {#if envIssues.length > 0}
+                <ul class="env-issues" role="alert">
+                  {#each envIssues as issue (issue.line)}
+                    <li>Line {issue.line}: {issue.message}</li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="env-empty">One NAME=value line per variable. Pastes from .env files, `export` or `set` output all parse.</p>
+              {/if}
+            {:else if editForm.env.length === 0}
               <p class="env-empty">No variables. The app inherits your environment.</p>
             {:else}
               <ul class="env-list">
@@ -844,7 +942,9 @@
                 {/each}
               </ul>
             {/if}
-            <button class="ghost sm env-add" type="button" onclick={addEnvRow}>Add variable</button>
+            {#if envEditMode === "rows"}
+              <button class="ghost sm env-add" type="button" onclick={addEnvRow}>Add variable</button>
+            {/if}
           </div>
 
           <div class="checks span2">
@@ -1594,6 +1694,15 @@
     height: 1px;
     background: var(--ash);
   }
+  /* The bulk-edit toggle rides the divider's right end; the ::after leader
+     fills the space between title and control, so the toggle is flush right
+     the same way the panel's foot buttons are. */
+  div.env-divider::after {
+    order: 1;
+  }
+  div.env-divider .env-mode {
+    order: 2;
+  }
 
   .error {
     margin: 0;
@@ -1605,7 +1714,90 @@
     font-size: var(--text-body-sm);
   }
 
-  /* ── Environment rows ───────────────────────────────────────────────────── */
+  /* ── Environment rows ─────────────────────────────────────────────── */
+  /* Bulk edit: the toggle sits flush right on the section divider, next to
+     the title, and the leader line fills the gap between them. The track
+     shows state; the word says it, so the toggle is button-labelled rather
+     than an icon switch. */
+  .env-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-8);
+    border: none;
+    background: transparent;
+    color: var(--graphite);
+    font-family: inherit;
+    font-size: var(--text-caption);
+    font-weight: var(--w-medium);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-micaps);
+    padding: var(--s-4) var(--s-8);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    transition: color 0.15s var(--ease-out);
+  }
+  /* Uppercase track phones cap on by the dividers have letter-spacing, so
+     opt it back out: the divider line and the toggle draw one connected shape. */
+  .env-mode:hover {
+    color: var(--ink);
+  }
+  .env-track {
+    display: inline-block;
+    width: 28px;
+    height: 16px;
+    border-radius: var(--r-pill);
+    background: var(--wash);
+    border: 1px solid var(--stone);
+    transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+  }
+  .env-thumb {
+    display: block;
+    width: 10px;
+    height: 10px;
+    margin: 2px;
+    border-radius: var(--r-pill);
+    background: var(--graphite);
+    transition: background 0.15s var(--ease-out), transform 0.15s var(--ease-out);
+  }
+  .env-mode[aria-pressed="true"] {
+    color: var(--ink);
+  }
+  .env-mode[aria-pressed="true"] .env-track {
+    background: var(--lime);
+    border-color: var(--lime);
+  }
+  .env-mode[aria-pressed="true"] .env-thumb {
+    background: var(--lime-ink);
+    transform: translateX(12px);
+  }
+
+  /* The bulk text view is the same inset-well field with room to breathe:
+     line-height matches the ledger's caption rhythm so lines scan cleanly. */
+  .env-textarea {
+    height: auto;
+    min-height: 108px;
+    padding: var(--s-12);
+    font-size: var(--text-body-sm);
+    line-height: 1.43;
+    resize: vertical;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  .env-issues {
+    list-style: none;
+    margin: 0;
+    padding: var(--s-12) var(--s-16);
+    background: var(--alert-wash);
+    border: 1px solid var(--alert);
+    border-radius: var(--r-input);
+    color: var(--alert);
+    font-size: var(--text-body-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-4);
+  }
+
   .env-list {
     list-style: none;
     margin: 0;

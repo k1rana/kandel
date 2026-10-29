@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-use kandel_config::{load_config, App};
+use kandel_config::{load_config_lenient, LoadedConfig};
 
 /// How long to wait after the last event before reloading.
 pub const DEBOUNCE_DELAY: Duration = Duration::from_millis(500);
@@ -127,17 +127,16 @@ pub fn event_is_relevant(event: &Event, filename: &str) -> bool {
     )
 }
 
-/// Loads `config_path`, retrying transient failures.
+/// Loads `config_path` leniently, retrying transient failures.
 ///
-/// Returns `Ok(apps)` on success, or the last error after
-/// [`RELOAD_MAX_ATTEMPTS`] attempts.
-pub fn load_with_retry(
-    config_path: &Path,
-) -> Result<std::collections::BTreeMap<String, App>, kandel_config::ConfigError> {
+/// Returns the last error after [`RELOAD_MAX_ATTEMPTS`] attempts. A file that
+/// parses but contains bad entries is still an `Ok`: they come back in
+/// [`LoadedConfig::invalid`].
+pub fn load_with_retry(config_path: &Path) -> Result<LoadedConfig, kandel_config::ConfigError> {
     let mut last_err = None;
     for attempt in 0..RELOAD_MAX_ATTEMPTS {
-        match load_config(config_path) {
-            Ok(apps) => return Ok(apps),
+        match load_config_lenient(config_path) {
+            Ok(loaded) => return Ok(loaded),
             Err(e) => {
                 tracing::warn!(
                     component = "reload",

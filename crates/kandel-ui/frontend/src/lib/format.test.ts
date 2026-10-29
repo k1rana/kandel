@@ -16,6 +16,7 @@ import {
   parseArgs,
   rowsFromConfig,
   sanitizeEnvKey,
+  splitConfig,
   stateView,
   summarize,
 } from "./format";
@@ -430,6 +431,11 @@ describe("rowsFromConfig", () => {
     expect(stateView("Unknown").healthy).toBe(false);
   });
 
+  it("renders a config error as a down tone, not a health reading", () => {
+    expect(stateView("ConfigError")).toMatchObject({ label: "Config error", tone: "down" });
+    expect(stateView("ConfigError").healthy).toBe(false);
+  });
+
   it("parses the config's args string into argv", () => {
     const rows = rowsFromConfig({ a: { enabled: true, command: "x", args: '-c "hello world"' } });
     expect(rows.a.args).toEqual(["-c", "hello world"]);
@@ -442,6 +448,14 @@ describe("rowsFromConfig", () => {
 
   it("returns nothing for an empty config", () => {
     expect(rowsFromConfig({})).toEqual({});
+  });
+
+  it("shows an entry with a value error in an error state", () => {
+    const rows = rowsFromConfig({
+      broken: { enabled: true, command: "nope.exe", errors: ["command not found in PATH: nope"] },
+    });
+    expect(rows.broken.state).toBe("ConfigError");
+    expect(rows.broken.errors).toEqual(["command not found in PATH: nope"]);
   });
 });
 
@@ -500,6 +514,49 @@ describe("mergeLedgerRows (config wins on identity, live on state)", () => {
   it("drops a row removed from config even if live status lingers", () => {
     const live = { gone: status({ name: "gone", state: "Running" }) };
     expect(mergeLedgerRows({}, live)).toEqual({});
+  });
+
+  it("keeps a value error over a live status", () => {
+    const configs = {
+      broken: { enabled: true, command: "nope.exe", errors: ["command not found in PATH: nope"] },
+    };
+    // A stale live status must not mask the config error.
+    const live = { broken: status({ name: "broken", state: "Running", pid: 42 }) };
+    const merged = mergeLedgerRows(configs, live);
+    expect(merged.broken.state).toBe("ConfigError");
+    expect(merged.broken.errors).toEqual(["command not found in PATH: nope"]);
+    expect(merged.broken.pid).toBe(0);
+  });
+});
+
+describe("splitConfig", () => {
+  it("routes a structural error to issues and keeps value errors as entries", () => {
+    const { entries, issues } = splitConfig({
+      ok: {},
+      bad_toml: { errors: ["unknown field `restart_delay`"], errorKind: "structural" },
+      bad_value: { errors: ["command not found in PATH: nope"], errorKind: "value" },
+    });
+    expect(Object.keys(entries).sort()).toEqual(["bad_value", "ok"]);
+    expect(issues).toEqual([
+      { name: "bad_toml", messages: ["unknown field `restart_delay`"], kind: "structural" },
+    ]);
+  });
+
+  it("collects every message for a multi-error entry", () => {
+    const { issues } = splitConfig({
+      bad: { errors: ["env[0] key is empty", "stop_timeout_sec must be >= 0"], errorKind: "structural" },
+    });
+    expect(issues[0].messages).toHaveLength(2);
+  });
+
+  it("treats an entry without an error as an entry", () => {
+    const { entries, issues } = splitConfig({ a: {} });
+    expect(Object.keys(entries)).toEqual(["a"]);
+    expect(issues).toEqual([]);
+  });
+
+  it("returns nothing for an empty config", () => {
+    expect(splitConfig({})).toEqual({ entries: {}, issues: [] });
   });
 });
 

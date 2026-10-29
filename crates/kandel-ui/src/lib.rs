@@ -55,6 +55,7 @@ pub fn run(config_path: PathBuf) {
             commands::get_full_config,
             commands::update_app_config,
             commands::delete_app_config,
+            commands::repair_config,
             commands::get_command_extensions,
             commands::select_command_path,
             ipc::get_initial_statuses,

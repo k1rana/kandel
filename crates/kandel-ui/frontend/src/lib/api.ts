@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { AboutInfo, AppConfig, AppStateInfo } from "./types";
+import type { AboutInfo, AppConfig, AppStateInfo, RepairReport } from "./types";
 
 /** Event name the core's status updates are forwarded under. */
 export const STATE_EVENT = "app-state-update";
@@ -27,9 +27,17 @@ export function openRepository(): Promise<void> {
   return invoke("open_repository");
 }
 
-/** Loads every config entry keyed by app name. */
+/** Loads every config entry keyed by app name.
+ *
+ * Invalid entries are included with `errors` and `errorKind` set, so the UI can
+ * list value errors as rows and route structural ones to repair. */
 export function getFullConfig(): Promise<Record<string, AppConfig>> {
   return invoke<Record<string, AppConfig>>("get_full_config");
+}
+
+/** Rewrites entries with malformed TOML from their best-effort draft. */
+export function repairConfig(): Promise<RepairReport> {
+  return invoke<RepairReport>("repair_config");
 }
 
 /** Saves `cfg`, renaming the entry when `oldName` differs from `cfg.name`. */

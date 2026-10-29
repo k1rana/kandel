@@ -18,6 +18,7 @@
 
 #[cfg(windows)]
 fn main() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windows::core::w;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -34,11 +35,10 @@ fn main() {
     // never be shown, and closing must not wait on a human.
     let auto = std::env::args().any(|a| a == "--auto");
 
-    // Read by the window procedure; the message loop runs on this thread.
-    thread_local! {
-        static AUTO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-    AUTO.with(|cell| cell.set(auto));
+    // The window procedure is a bare `extern "system"` callback, so it cannot
+    // capture `auto`; it reads this process-global instead.
+    static AUTO: AtomicBool = AtomicBool::new(false);
+    AUTO.store(auto, Ordering::Relaxed);
 
     unsafe extern "system" fn window_proc(
         hwnd: HWND,
@@ -48,7 +48,7 @@ fn main() {
     ) -> LRESULT {
         match msg {
             WM_CLOSE => {
-                if AUTO.with(|cell| cell.get()) {
+                if AUTO.load(Ordering::Relaxed) {
                     // Headless: report success through the exit code and quit.
                     unsafe { PostQuitMessage(0) };
                 } else {

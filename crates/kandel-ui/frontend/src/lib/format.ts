@@ -1,7 +1,29 @@
 /** Pure helpers used by the UI. Kept free of DOM/Tauri dependencies so they are
  * straightforward to unit test. */
 
-import type { AppStateInfo, EnvVar, LogEvent } from "./types";
+import type { AppStateInfo, ConfigIssue, EnvVar, LogEvent } from "./types";
+
+/**
+ * Splits a config map into entries to list and structural problems to repair.
+ *
+ * A *value* error (an unresolvable command, say) stays in `entries`: it is shown
+ * as a ledger row in an error state and fixed by editing. A *structural* error
+ * (bad TOML writing) goes to `issues`, fixed by the repair flow.
+ */
+export function splitConfig<T extends { errors?: string[]; errorKind?: "structural" | "value" }>(
+  configs: Record<string, T>,
+): { entries: Record<string, T>; issues: ConfigIssue[] } {
+  const entries: Record<string, T> = {};
+  const issues: ConfigIssue[] = [];
+  for (const [name, cfg] of Object.entries(configs)) {
+    if (cfg.errors?.length && cfg.errorKind === "structural") {
+      issues.push({ name, messages: cfg.errors, kind: "structural" });
+    } else {
+      entries[name] = cfg;
+    }
+  }
+  return { entries, issues };
+}
 
 /** Normalizes edited environment pairs into the persisted form.
  *
@@ -242,6 +264,8 @@ export function stateView(state: string): StateView {
       return { label: "Retrying", tone: "waiting", healthy: false };
     case "failed":
       return { label: "Failed", tone: "down", healthy: false };
+    case "configerror":
+      return { label: "Config error", tone: "down", healthy: false };
     case "unknown":
       return { label: "Unknown", tone: "unknown", healthy: false };
     default:
@@ -273,6 +297,8 @@ export interface ConfigEntry {
   command: string;
   /** Shell-formatted arguments, as stored in the config DTO. */
   args?: string;
+  /** Value problems that make the entry unusable, if any. */
+  errors?: string[];
 }
 
 /** Splits a shell-like argument string into individual arguments.
@@ -346,6 +372,14 @@ function parseArgsSafe(input: string | undefined): string[] {
  */
 export const PENDING_STATE = "Unknown";
 
+/**
+ * State of an entry whose config value is unusable.
+ *
+ * Distinct from `Failed` (the process ran and gave up): this entry never
+ * launched, because its config cannot be resolved. Editing it clears the state.
+ */
+export const CONFIG_ERROR_STATE = "ConfigError";
+
 /** Builds ledger rows from the config file.
  *
  * Config is the source of truth for *which* entries exist, so the ledger is
@@ -357,14 +391,17 @@ export const PENDING_STATE = "Unknown";
 export function rowsFromConfig(configs: Record<string, ConfigEntry>): Record<string, AppStateInfo> {
   const rows: Record<string, AppStateInfo> = {};
   for (const [name, cfg] of Object.entries(configs)) {
+    const errors = cfg.errors?.length ? cfg.errors : undefined;
     rows[name] = {
       name,
-      state: PENDING_STATE,
+      // An entry with a config error is shown in an error state, not as Unknown.
+      state: errors ? CONFIG_ERROR_STATE : PENDING_STATE,
       pid: 0,
       enabled: cfg.enabled,
       command: cfg.command,
       args: parseArgsSafe(cfg.args),
       restartCount: 0,
+      errors,
     };
   }
   return rows;
@@ -384,12 +421,24 @@ export function mergeLedgerRows(
 ): Record<string, AppStateInfo> {
   const merged: Record<string, AppStateInfo> = {};
   for (const [name, row] of Object.entries(rowsFromConfig(configs))) {
+    // A config value error wins over any live status: the core skips an entry it
+    // cannot resolve, so a row must report the error, not a last-known state.
+    if (row.errors?.length) {
+      merged[name] = row;
+      continue;
+    }
     const status = live[name];
     merged[name] = status
       ? { ...status, enabled: row.enabled, command: row.command, args: row.args }
       : row;
   }
   return merged;
+}
+
+/** The hover text for a row's config errors: one line per problem. */
+export function configErrorTooltip(errors: string[] | undefined): string {
+  if (!errors?.length) return "";
+  return errors.join("\n");
 }
 
 /** Counts the ledger's apps and how many are healthy. */

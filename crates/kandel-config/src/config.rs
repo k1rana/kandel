@@ -7,7 +7,7 @@
 //! defaults and writes the remaining fields in a fixed order so that saving a
 //! just-loaded config is stable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -187,60 +187,70 @@ impl App {
     /// are not rewritten); expansion and path resolution happen on demand via
     /// the `resolved_*` helpers.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.validate_all().into_iter().next() {
+            Some(message) => Err(ConfigError::Other(message)),
+            None => Ok(()),
+        }
+    }
+
+    /// Collects every validation problem, so a caller can report them all at once
+    /// instead of stopping at the first. Empty means valid.
+    pub fn validate_all(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
         if self.command.is_empty() {
-            return Err(ConfigError::Other("command is mandatory".into()));
+            errors.push("command is mandatory".into());
+        } else if let Err(e) = self.resolved_command() {
+            errors.push(format!("invalid command: {e}"));
         }
 
-        self.resolved_command()
-            .map_err(|e| ConfigError::Other(format!("invalid command: {e}")))?;
-
         for (i, arg) in self.args.iter().enumerate() {
-            expand::expand_env(arg)
-                .map_err(|e| ConfigError::Other(format!("invalid args[{i}]: {e}")))?;
+            if let Err(e) = expand::expand_env(arg) {
+                errors.push(format!("invalid args[{i}]: {e}"));
+            }
         }
 
         for (i, var) in self.env.iter().enumerate() {
             if var.key.trim().is_empty() {
-                return Err(ConfigError::Other(format!("env[{i}] key is empty")));
-            }
-            if var
+                errors.push(format!("env[{i}] key is empty"));
+            } else if var
                 .key
                 .chars()
                 .any(|c| c.is_whitespace() || c == '=' || c == '\0')
             {
-                return Err(ConfigError::Other(format!(
+                errors.push(format!(
                     "env[{i}] key must not contain whitespace, '=', or NUL"
-                )));
+                ));
+            } else if var.value.contains('\0') {
+                errors.push(format!("env[{i}] value must not contain NUL"));
+            } else if let Err(e) = expand::validate_template(&var.value, false) {
+                errors.push(format!("invalid env[{i}]: {e}"));
             }
-            if var.value.contains('\0') {
-                return Err(ConfigError::Other(format!(
-                    "env[{i}] value must not contain NUL"
-                )));
-            }
-            expand::validate_template(&var.value, false)
-                .map_err(|e| ConfigError::Other(format!("invalid env[{i}]: {e}")))?;
         }
 
         for (i, arg) in self.stop_args.iter().enumerate() {
-            expand::validate_template(arg, true)
-                .map_err(|e| ConfigError::Other(format!("invalid stop_args[{i}]: {e}")))?;
+            if let Err(e) = expand::validate_template(arg, true) {
+                errors.push(format!("invalid stop_args[{i}]: {e}"));
+            }
         }
 
         if !self.stop_command.is_empty() {
-            self.resolved_stop_command()
-                .map_err(|e| ConfigError::Other(format!("invalid stop_command: {e}")))?;
+            if let Err(e) = self.resolved_stop_command() {
+                errors.push(format!("invalid stop_command: {e}"));
+            }
         }
 
         if !self.cwd.is_empty() {
-            expand::expand_env(&self.cwd)
-                .map_err(|e| ConfigError::Other(format!("invalid cwd: {e}")))?;
+            if let Err(e) = expand::expand_env(&self.cwd) {
+                errors.push(format!("invalid cwd: {e}"));
+            }
         }
 
         if self.stop_timeout_sec < 0 {
-            return Err(ConfigError::Other("stop_timeout_sec must be >= 0".into()));
+            errors.push("stop_timeout_sec must be >= 0".into());
         }
 
-        Ok(())
+        errors
     }
 
     /// `command` with `${NAME}` placeholders expanded and the path resolved to
@@ -313,10 +323,59 @@ impl App {
     }
 }
 
-/// Reads and parses the config file at `path`.
+/// Why an entry was rejected, which decides how it is surfaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidKind {
+    /// The entry's TOML is wrong: an unknown key, a wrong type, or a non-table
+    /// entry. The entry cannot be read until the writing is fixed.
+    Structural,
+    /// The TOML reads fine but a value is unusable: an empty or unresolvable
+    /// command, a bad placeholder, a negative timeout. The entry is shown and
+    /// edited as-is, not repaired.
+    Value,
+}
+
+/// A configuration entry that could not be loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidEntry {
+    /// The entry's table name.
+    pub name: String,
+    /// Every reason the entry was rejected, so the UI can list them all.
+    pub messages: Vec<String>,
+    /// Best-effort reconstruction; unreadable fields fall back to defaults, so
+    /// the entry can still be shown and edited.
+    pub draft: App,
+    /// Which kind of problem this is.
+    pub kind: InvalidKind,
+}
+
+/// The result of a lenient load: entries that loaded and entries that did not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoadedConfig {
+    /// Entries that parsed and validated cleanly.
+    pub apps: BTreeMap<String, App>,
+    /// Entries that were rejected, keyed by table name.
+    pub invalid: BTreeMap<String, InvalidEntry>,
+}
+
+/// Reads and parses the config file at `path` leniently.
 ///
-/// Returns a map of app name to [`App`]. Every entry is validated; the first
-/// invalid entry aborts the load with [`ConfigError::Invalid`].
+/// Only a file that cannot be read, or that is not valid TOML, is an error: a
+/// single bad entry never fails the load. It lands in [`LoadedConfig::invalid`]
+/// with a reason and a repair [`draft`](InvalidEntry::draft) while every other
+/// entry still loads.
+pub fn load_config_lenient(path: &Path) -> Result<LoadedConfig, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    parse_config_lenient(&text)
+}
+
+/// Reads and parses the config file at `path`, failing on the first bad entry.
+///
+/// The strict counterpart to [`load_config_lenient`]; prefer it where a partial
+/// config would be misleading (for example a test asserting rejection).
 pub fn load_config(path: &Path) -> Result<BTreeMap<String, App>, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_path_buf(),
@@ -325,30 +384,196 @@ pub fn load_config(path: &Path) -> Result<BTreeMap<String, App>, ConfigError> {
     parse_config(&text)
 }
 
-/// Parses config TOML from a string. See [`load_config`].
-pub fn parse_config(text: &str) -> Result<BTreeMap<String, App>, ConfigError> {
+/// Parses config TOML from a string leniently. See [`load_config_lenient`].
+pub fn parse_config_lenient(text: &str) -> Result<LoadedConfig, ConfigError> {
     let table: toml::Table = toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
-    let mut apps = BTreeMap::new();
+    let mut loaded = LoadedConfig::default();
     for (name, value) in table {
-        if !value.is_table() {
-            return Err(ConfigError::Invalid {
-                app: name.clone(),
-                message: "entry must be a table".into(),
-            });
+        match parse_entry(&name, value) {
+            EntryOutcome::Valid(app) => {
+                loaded.apps.insert(name, app);
+            }
+            EntryOutcome::Invalid {
+                messages,
+                draft,
+                kind,
+            } => {
+                loaded.invalid.insert(
+                    name.clone(),
+                    InvalidEntry {
+                        name,
+                        messages,
+                        draft,
+                        kind,
+                    },
+                );
+            }
         }
-        let mut app: App = value.try_into().map_err(|e| ConfigError::Invalid {
-            app: name.clone(),
-            message: format!("{e}"),
-        })?;
-        app.name = name.clone();
-        app.validate().map_err(|e| ConfigError::Invalid {
-            app: name.clone(),
-            message: e.to_string(),
-        })?;
-        apps.insert(name, app);
     }
-    Ok(apps)
+    Ok(loaded)
+}
+
+/// Parses config TOML from a string, failing on the first bad entry.
+///
+/// The strict counterpart to [`parse_config_lenient`].
+pub fn parse_config(text: &str) -> Result<BTreeMap<String, App>, ConfigError> {
+    let loaded = parse_config_lenient(text)?;
+    match loaded.invalid.into_iter().next() {
+        Some((_, entry)) => Err(ConfigError::Invalid {
+            app: entry.name,
+            message: entry.messages.join("; "),
+        }),
+        None => Ok(loaded.apps),
+    }
+}
+
+/// The outcome of parsing one entry.
+enum EntryOutcome {
+    /// Parsed and validated.
+    Valid(App),
+    /// Rejected, with every reason and a best-effort draft.
+    Invalid {
+        messages: Vec<String>,
+        draft: App,
+        kind: InvalidKind,
+    },
+}
+
+/// Parses one table into an [`App`], never failing: a bad entry comes back as
+/// [`EntryOutcome::Invalid`] so the caller can keep going.
+///
+/// A serde failure is a *structural* problem (the writing is wrong); a
+/// validation failure is a *value* problem (the writing is fine).
+fn parse_entry(name: &str, value: toml::Value) -> EntryOutcome {
+    if !value.is_table() {
+        return EntryOutcome::Invalid {
+            kind: InvalidKind::Structural,
+            messages: vec!["entry must be a table".into()],
+            draft: App {
+                name: name.to_string(),
+                ..App::default()
+            },
+        };
+    }
+
+    // Prefer the serde model, so the happy path stays single-sourced.
+    let parsed: Result<App, _> = value.clone().try_into();
+    match parsed {
+        Ok(mut app) => {
+            app.name = name.to_string();
+            let messages = app.validate_all();
+            if messages.is_empty() {
+                EntryOutcome::Valid(app)
+            } else {
+                // Validation never drops fields, so the parsed app is its own draft.
+                EntryOutcome::Invalid {
+                    kind: InvalidKind::Value,
+                    messages,
+                    draft: app,
+                }
+            }
+        }
+        Err(e) => EntryOutcome::Invalid {
+            kind: InvalidKind::Structural,
+            messages: vec![e.to_string()],
+            draft: draft_from_value(name, &value),
+        },
+    }
+}
+
+/// Rebuilds an entry from its raw TOML, keeping every field that can be read and
+/// defaulting the rest. Unknown keys are dropped so a repair writes a clean entry.
+fn draft_from_value(name: &str, value: &toml::Value) -> App {
+    let mut app = App {
+        name: name.to_string(),
+        ..App::default()
+    };
+    let Some(table) = value.as_table() else {
+        return app;
+    };
+
+    if let Some(v) = table.get("command").and_then(toml::Value::as_str) {
+        app.command = v.to_string();
+    }
+    app.args = string_array(table.get("args"));
+    app.env = env_array(table.get("env"));
+    if let Some(v) = table.get("cwd").and_then(toml::Value::as_str) {
+        app.cwd = v.to_string();
+    }
+    if let Some(v) = table.get("enabled").and_then(toml::Value::as_bool) {
+        app.enabled = v;
+    }
+    if let Some(v) = table.get("hide_window").and_then(toml::Value::as_bool) {
+        app.hide_window = v;
+    }
+    if let Some(v) = table.get("capture_output").and_then(toml::Value::as_bool) {
+        app.capture_output = v;
+    }
+    if let Some(v) = table.get("stop_command").and_then(toml::Value::as_str) {
+        app.stop_command = v.to_string();
+    }
+    app.stop_args = string_array(table.get("stop_args"));
+    if let Some(v) = table
+        .get("stop_timeout_sec")
+        .and_then(toml::Value::as_integer)
+    {
+        app.stop_timeout_sec = v;
+    }
+    if let Some(v) = table
+        .get("restart_delay_sec")
+        .and_then(toml::Value::as_integer)
+    {
+        app.restart_delay_sec = v;
+    }
+    if let Some(v) = table.get("max_retries").and_then(toml::Value::as_integer) {
+        app.max_retries = v;
+    }
+    if let Some(v) = table
+        .get("healthy_timeout_sec")
+        .and_then(toml::Value::as_integer)
+    {
+        app.healthy_timeout_sec = v;
+    }
+    app
+}
+
+/// Reads a TOML array of strings, ignoring non-string elements.
+fn string_array(value: Option<&toml::Value>) -> Vec<String> {
+    value
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reads a TOML array of `{ key, value }` tables, ignoring malformed elements.
+fn env_array(value: Option<&toml::Value>) -> Vec<EnvVar> {
+    value
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(toml::Value::as_table)
+                .filter_map(|t| {
+                    let key = t.get("key").and_then(toml::Value::as_str)?;
+                    let value = t
+                        .get("value")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or_default();
+                    Some(EnvVar {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The TOML representation of an app entry, with a fixed field order.
@@ -434,43 +659,65 @@ pub fn save_config(path: &Path, apps: &BTreeMap<String, App>) -> Result<(), Conf
 /// An entry whose parsed value is identical to the one on disk is left byte for
 /// byte, so editing one app never disturbs another's comments, key order, or
 /// quoting. A changed entry gets its body rewritten in the canonical form, but
-/// its table header comment (and any blank lines above it) is kept. Entries
-/// removed from `apps` are deleted.
+/// its table header comment (and any blank lines above it) is kept. A table no
+/// longer in `apps` is deleted only when it parses cleanly; one that fails to
+/// parse is left verbatim, so a save can never destroy a broken entry the user
+/// can still repair.
 ///
 /// Comments placed *inside* a changed entry's body are the one thing not kept:
 /// writing a field means regenerating that entry's scalar fields. Comments above
 /// the entry, on other entries, and at the top or bottom of the file all
 /// survive. For the exact behavior, see the `save_preserving_*` tests.
 ///
-/// When the existing file is absent or cannot be parsed, there is nothing to
-/// preserve and this falls back to a canonical rewrite via [`save_config`].
+/// When the existing file is absent or cannot be parsed *as a whole*, there is
+/// nothing to preserve and this falls back to a canonical rewrite via
+/// [`save_config`].
 pub fn save_config_preserving(
     path: &Path,
     apps: &BTreeMap<String, App>,
 ) -> Result<(), ConfigError> {
+    save_config_preserving_removing(path, apps, &BTreeSet::new())
+}
+
+/// Like [`save_config_preserving`], but also deletes the tables named in
+/// `remove` even when they did not parse cleanly.
+///
+/// The delete path for the UI: a broken entry the user can see must be removable,
+/// so removal is explicit rather than inferred from absence.
+pub fn save_config_preserving_removing(
+    path: &Path,
+    apps: &BTreeMap<String, App>,
+    remove: &BTreeSet<String>,
+) -> Result<(), ConfigError> {
     let existing_text = std::fs::read_to_string(path).unwrap_or_default();
-    let existing_apps = parse_config(&existing_text).ok();
+    let existing = parse_config_lenient(&existing_text).ok();
     let mut doc: toml_edit::DocumentMut = match existing_text.parse() {
         Ok(doc) => doc,
         Err(_) => return save_config(path, apps),
     };
 
-    // Drop app tables that are no longer configured. Non-table root keys are
-    // left untouched: they are not entries (parse_config would reject them), so
-    // removing them would silently delete data the model does not own.
+    // Drop app tables no longer configured, but only those that parse cleanly
+    // (a genuine removal) or are explicitly named in `remove`. Anything else is
+    // left untouched so a broken entry the user still has is never deleted.
     let stale: Vec<String> = doc
         .iter()
         .filter(|(name, item)| item.is_table() && !apps.contains_key(*name))
         .map(|(name, _)| name.to_string())
+        .filter(|name| {
+            remove.contains(name)
+                || existing
+                    .as_ref()
+                    .is_some_and(|loaded| loaded.apps.contains_key(name))
+        })
         .collect();
     for name in stale {
         doc.remove(&name);
     }
 
     for (name, app) in apps {
-        let unchanged = existing_apps
+        let unchanged = existing
             .as_ref()
-            .and_then(|map| map.get(name))
+            .and_then(|loaded| loaded.apps.get(name))
             .is_some_and(|current| current == app);
         if unchanged && doc.contains_key(name) {
             continue;
@@ -1435,5 +1682,147 @@ env = [
             ..App::default()
         };
         assert!(app.resolved_env().is_err());
+    }
+
+    #[test]
+    fn lenient_load_keeps_valid_entries_and_flags_the_bad_one() {
+        // The core promise: one broken entry must not take the whole config down.
+        let text = "[\"good\"]\ncommand = \"cmd.exe\"\n\n[\"broken\"]\ncommand = \"cmd.exe\"\nrestart_delay = 3\n";
+        let loaded = parse_config_lenient(text).unwrap();
+
+        assert!(loaded.apps.contains_key("good"));
+        assert!(!loaded.apps.contains_key("broken"));
+        let broken = &loaded.invalid["broken"];
+        assert!(
+            broken.messages.iter().any(|m| m.contains("restart_delay")),
+            "{:?}",
+            broken.messages
+        );
+        // A misspelled key is a TOML-writing problem, so repair may rewrite it.
+        assert_eq!(broken.kind, InvalidKind::Structural);
+    }
+
+    #[test]
+    fn lenient_flags_an_unresolvable_command_as_a_value_error() {
+        // A command that is not on PATH is a *value* problem: the writing is fine,
+        // so it is shown as an entry and edited, not repaired.
+        let text = "[\"broken\"]\ncommand = \"kandel-no-such-tool-xyz\"\n";
+        let loaded = parse_config_lenient(text).unwrap();
+        let broken = &loaded.invalid["broken"];
+        assert_eq!(broken.kind, InvalidKind::Value);
+        // The draft keeps the command the user wrote.
+        assert_eq!(broken.draft.command, "kandel-no-such-tool-xyz");
+    }
+
+    #[test]
+    fn validate_all_reports_every_problem_not_just_the_first() {
+        // The regression: a config with several bad fields used to surface only
+        // the first, forcing one fix-and-retry per problem.
+        let app = App {
+            command: String::new(),
+            stop_timeout_sec: -1,
+            env: vec![
+                EnvVar {
+                    key: String::new(),
+                    value: "x".into(),
+                },
+                EnvVar {
+                    key: "BAD KEY".into(),
+                    value: "y".into(),
+                },
+            ],
+            ..App::default()
+        };
+        let errors = app.validate_all();
+        assert!(errors.len() >= 3, "expected several errors, got {errors:?}");
+        assert!(errors.iter().any(|e| e.contains("command is mandatory")));
+        assert!(errors.iter().any(|e| e.contains("stop_timeout_sec")));
+        assert!(errors.iter().any(|e| e.contains("env[0]")));
+    }
+
+    #[test]
+    fn a_single_value_problem_is_reported_as_one_message() {
+        let text = "[\"broken\"]\ncommand = \"kandel-no-such-tool-xyz\"\n";
+        let loaded = parse_config_lenient(text).unwrap();
+        assert_eq!(loaded.invalid["broken"].messages.len(), 1);
+    }
+
+    #[test]
+    fn lenient_flags_an_empty_command_as_a_value_error() {
+        let loaded = parse_config_lenient("[\"broken\"]\ncommand = \"\"\n").unwrap();
+        assert_eq!(loaded.invalid["broken"].kind, InvalidKind::Value);
+    }
+
+    #[test]
+    fn lenient_draft_recovers_known_fields() {
+        // A draft must carry what the user wrote so the entry can be repaired in
+        // the editor rather than lost.
+        let text = "[\"broken\"]\ncommand = \"myapp.exe\"\nargs = [\"--x\"]\nrestart_delay = 3\n";
+        let loaded = parse_config_lenient(text).unwrap();
+        let draft = &loaded.invalid["broken"].draft;
+        assert_eq!(draft.name, "broken");
+        assert_eq!(draft.command, "myapp.exe");
+        assert_eq!(draft.args, ["--x"]);
+    }
+
+    #[test]
+    fn lenient_load_still_errors_on_broken_toml() {
+        // A whole-file syntax error is still fatal; only per-entry problems are
+        // tolerated.
+        assert!(matches!(
+            parse_config_lenient("this is not = = toml"),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn lenient_load_of_valid_config_has_no_invalid() {
+        let loaded = parse_config_lenient("[\"a\"]\ncommand = \"cmd.exe\"\n").unwrap();
+        assert_eq!(loaded.apps.len(), 1);
+        assert!(loaded.invalid.is_empty());
+    }
+
+    #[test]
+    fn save_preserving_leaves_a_broken_entry_verbatim() {
+        // A save that only touches a valid entry must not delete a broken one the
+        // user can still repair.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[\"good\"]\ncommand = \"cmd.exe\"\n\n[\"broken\"]\ncommand = \"cmd.exe\"\nrestart_delay = 3\n";
+        std::fs::write(&path, original).unwrap();
+
+        let loaded = parse_config_lenient(original).unwrap();
+        save_config_preserving(&path, &loaded.apps).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            got.contains("[\"broken\"]"),
+            "broken entry was deleted:\n{got}"
+        );
+        assert!(
+            got.contains("restart_delay = 3"),
+            "broken entry lost data:\n{got}"
+        );
+    }
+
+    #[test]
+    fn save_preserving_removing_deletes_a_broken_entry_when_named() {
+        // The delete path: a broken entry the user can see must be removable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[\"good\"]\ncommand = \"cmd.exe\"\n\n[\"broken\"]\ncommand = \"cmd.exe\"\nrestart_delay = 3\n";
+        std::fs::write(&path, original).unwrap();
+
+        let loaded = parse_config_lenient(original).unwrap();
+        let mut remove = BTreeSet::new();
+        remove.insert("broken".to_string());
+        save_config_preserving_removing(&path, &loaded.apps, &remove).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !got.contains("[\"broken\"]"),
+            "broken entry lingers:\n{got}"
+        );
+        assert!(got.contains("[\"good\"]"), "good entry was lost:\n{got}");
     }
 }

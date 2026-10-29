@@ -32,6 +32,37 @@ export interface AppConfig {
   stopTimeoutSec: number;
   /** Whether the process's stdout/stderr are captured into its log. */
   captureOutput: boolean;
+  /**
+   * Why the entry failed to load, when it is on disk but invalid.
+   *
+   * Empty for a valid entry. Non-empty means the other fields are a best-effort
+   * draft.
+   */
+  errors?: string[];
+  /**
+   * Which kind of problem `errors` describes.
+   *
+   * `structural` is a TOML-writing problem the repair flow can rewrite; `value`
+   * is a bad value that is shown as a ledger row in an error state and fixed by
+   * editing.
+   */
+  errorKind?: "structural" | "value";
+}
+
+/** An entry that failed to load, kept aside for display. */
+export interface ConfigIssue {
+  name: string;
+  messages: string[];
+  /** A writing problem (repairable) versus a value problem (edit it). */
+  kind: "structural" | "value";
+}
+
+/** The result of a config auto-repair run. Mirrors the Rust `RepairReport`. */
+export interface RepairReport {
+  /** Entries that were rewritten and now load. */
+  repaired: string[];
+  /** Entries that still need manual attention. */
+  skipped: { name: string; reason: string }[];
 }
 
 /** A runtime status update pushed by the core over IPC. */
@@ -43,6 +74,13 @@ export interface AppStateInfo {
   command: string;
   args: string[];
   restartCount: number;
+  /**
+   * Why the entry's config is unusable, when it is a value problem.
+   *
+   * Empty for a healthy entry. Non-empty means the row is in an error state and
+   * the reasons are shown on hover.
+   */
+  errors?: string[];
 }
 
 /** Creates an empty form for a new app entry. */

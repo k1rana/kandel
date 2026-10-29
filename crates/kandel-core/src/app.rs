@@ -11,7 +11,8 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 
 use kandel_config::{
-    instance_mutex_name, load_config, save_config, App as AppConfig, RuntimeFlags, DEFAULT_CONFIG,
+    instance_mutex_name, load_config_lenient, save_config, App as AppConfig, LoadedConfig,
+    RuntimeFlags, DEFAULT_CONFIG,
 };
 
 use crate::autostart::AutoStartManager;
@@ -35,17 +36,26 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
 
     let auto_start = AutoStartManager::new(flags.clone()).ok();
 
-    // Initial (strict) load: an invalid config at startup is fatal.
-    let apps = match load_config(&config_path) {
-        Ok(apps) => apps,
+    // Initial load is lenient: a single bad entry never blocks startup, and even
+    // a whole-file problem keeps the core running so the tray and watcher stay up.
+    let loaded = match load_config_lenient(&config_path) {
+        Ok(loaded) => loaded,
         Err(e) => {
             show_error_dialog(
                 "Kandel - Configuration Error",
                 &format!("Failed to load config.toml:\n\n{e}"),
             );
-            anyhow::bail!("failed to load config: {e}");
+            tracing::error!(
+                component = "main",
+                path = %config_path.display(),
+                error = %e,
+                "config could not be loaded; starting with no entries"
+            );
+            LoadedConfig::default()
         }
     };
+    log_invalid_entries(&config_path, &loaded);
+    let apps = loaded.apps;
 
     let logs = Arc::new(LogStore::new(crate::logs::DEFAULT_LOG_CAP));
 
@@ -222,13 +232,15 @@ fn spawn_watcher(config_path: PathBuf, supervisor: Arc<Supervisor>) {
 /// Reloads the config, keeping current state on failure.
 fn reload_and_reconcile(config_path: &Path, supervisor: &Supervisor) {
     match watcher::load_with_retry(config_path) {
-        Ok(apps) => {
+        Ok(loaded) => {
+            log_invalid_entries(config_path, &loaded);
             tracing::info!(
                 component = "reload",
-                entries = apps.len(),
+                entries = loaded.apps.len(),
+                invalid = loaded.invalid.len(),
                 "config reloaded, reconciling"
             );
-            supervisor.reconcile(apps);
+            supervisor.reconcile(loaded.apps);
         }
         Err(e) => {
             tracing::error!(component = "reload", path = %config_path.display(), error = %e, "config reload failed after retries, keeping current state");
@@ -239,6 +251,20 @@ fn reload_and_reconcile(config_path: &Path, supervisor: &Supervisor) {
                 ),
             );
         }
+    }
+}
+
+/// Logs every entry that failed to load, so it is visible in the log even though
+/// it does not block the rest of the config.
+fn log_invalid_entries(config_path: &Path, loaded: &LoadedConfig) {
+    for (name, entry) in &loaded.invalid {
+        tracing::warn!(
+            component = "reload",
+            path = %config_path.display(),
+            app = %name,
+            errors = ?entry.messages,
+            "entry skipped: invalid config"
+        );
     }
 }
 

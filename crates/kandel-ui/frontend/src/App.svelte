@@ -9,12 +9,15 @@
     getInitialStatuses,
     onConnectionChange,
     onStateUpdate,
+    repairConfig,
     selectCommandPath,
     updateAppConfig,
   } from "./lib/api";
   import {
     applyStateUpdate,
     clampInt,
+    CONFIG_ERROR_STATE,
+    configErrorTooltip,
     envFromText,
     envToText,
     extractAppNameFromPath,
@@ -26,13 +29,14 @@
     normalizeEnv,
     PENDING_STATE,
     sanitizeEnvKey,
+    splitConfig,
     stateView,
     summarize,
     type EnvTextIssue,
     type LogRow,
   } from "./lib/format";
   import { onLogUpdate, getAppLogs } from "./lib/api";
-  import { makeEmptyForm, type AppConfig, type AppStateInfo, type EnvVar, type LogEvent } from "./lib/types";
+  import { makeEmptyForm, type AppConfig, type AppStateInfo, type ConfigIssue, type EnvVar, type LogEvent } from "./lib/types";
   import ResizeHandles from "./lib/ResizeHandles.svelte";
   import Titlebar from "./lib/Titlebar.svelte";
   import { isWindowMaximized, onWindowResized } from "./lib/window";
@@ -55,6 +59,13 @@
   // attached core status supplies *how* they run (state, pid, restart count).
   // While detached the second source is empty and the rows say so.
   let configEntries = $state<Record<string, AppConfig>>({});
+  // Entries that are on disk but failed to load. Listed separately so a broken
+  // entry is visible and repairable without being treated as a runnable app.
+  let configIssues = $state<ConfigIssue[]>([]);
+  // A whole-file problem (unreadable, or invalid TOML), as opposed to a single
+  // broken entry. Its own banner: an empty ledger would otherwise read as "no
+  // apps" rather than "the file could not be read".
+  let configError = $state("");
   let liveApps = $state<Record<string, AppStateInfo>>({});
   // Whether a core is attached. While false the ledger still lists every
   // configured entry, but runtime facts (state, PID, restart count) are unknown,
@@ -78,9 +89,34 @@
   async function refreshFromConfig() {
     try {
       const configs = await getFullConfig();
-      configEntries = configs;
+      const { entries, issues } = splitConfig(configs);
+      configEntries = entries;
+      configIssues = issues;
+      configError = "";
     } catch (e) {
-      errorMessage = `Could not read the config: ${e}`;
+      configError = `${e}`;
+    }
+  }
+
+  /** Rewrites broken entries from their drafts, then reloads the list. */
+  async function autoFixConfig() {
+    isRepairing = true;
+    errorMessage = "";
+    try {
+      const report = await repairConfig();
+      await refreshFromConfig();
+      if (report.skipped.length > 0) {
+        errorMessage =
+          `Repaired ${report.repaired.length} entr${report.repaired.length === 1 ? "y" : "ies"}. ` +
+          `${report.skipped.length} still need attention: ` +
+          report.skipped.map((s) => `${s.name} (${s.reason})`).join("; ");
+      } else if (report.repaired.length > 0) {
+        errorMessage = "Config repaired.";
+      }
+    } catch (e) {
+      errorMessage = `Could not repair the config: ${e}`;
+    } finally {
+      isRepairing = false;
     }
   }
 
@@ -112,7 +148,11 @@
   let isPickingCommand = $state(false);
   let isPickingStopCommand = $state(false);
   let errorMessage = $state("");
+  let isRepairing = $state(false);
   let editingOriginalName = $state("");
+  // Config-load errors for the entry being edited: a chip beside the title, not
+  // the validation box, which is reserved for a problem that blocks saving.
+  let editingErrors = $state<string[]>([]);
   let editForm = $state<AppConfig>(makeEmptyForm());
 
   /** Which rendering the Environment section is edited through. */
@@ -127,12 +167,23 @@
   let envIssues = $state<EnvTextIssue[]>([]);
 
   let panelEl = $state<HTMLDivElement | null>(null);
+  let editorBodyEl = $state<HTMLDivElement | null>(null);
+  let editorErrorEl = $state<HTMLParagraphElement | null>(null);
   let nameInputEl = $state<HTMLInputElement | null>(null);
   let lastFocused = $state<HTMLElement | null>(null);
 
   // ── Row menu state ───────────────────────────────────────────────────────
-  let rowMenu = $state({ visible: false, x: 0, y: 0, name: "", enabled: false });
+  let rowMenu = $state({ visible: false, x: 0, y: 0, name: "", enabled: false, error: false });
   let restarting = $state<Record<string, boolean>>({});
+
+  // ── Cursor tooltip state ─────────────────────────────────────────────────
+  // Config errors ride a tooltip anchored at the pointer rather than a third
+  // line in the row, so rows keep a fixed two-line rhythm.
+  let hoverTip = $state({ visible: false, x: 0, y: 0, items: [] as string[] });
+  // Clamped position, measured against the real tooltip size so it never runs
+  // off the window edge.
+  let tipEl = $state<HTMLDivElement | null>(null);
+  let tipPos = $state({ left: 0, top: 0 });
 
   // ── Log panel state ──────────────────────────────────────────────────────
   // The log panel is a read-only view of one app's captured output. It opens
@@ -269,6 +320,9 @@
    * that is what the user needs to know. One concept, one word: the ledger, the
    * row menu (Pause/Resume), and the editor checkbox all say "paused". */
   function displayState(app: AppStateInfo) {
+    // A config value error outranks every runtime state: the entry cannot run,
+    // so showing "Running" or "Paused" would be a lie.
+    if (app.state === CONFIG_ERROR_STATE) return stateView(CONFIG_ERROR_STATE);
     if (!app.enabled) return { label: "Paused", tone: "idle" as const, healthy: false };
     // Without a supervisor the row's state is the config placeholder, so show
     // the unknown word rather than let "Starting" read as a real transition.
@@ -345,6 +399,7 @@
 
   function openEditor(appName: string) {
     errorMessage = "";
+    editingErrors = [];
     confirmDelete = false;
     isSaving = false;
     isCreateMode = false;
@@ -359,7 +414,11 @@
           return;
         }
         editingOriginalName = appName;
-        editForm = { ...cfg, env: cfg.env.map((pair) => ({ ...pair })) };
+        // Config-load errors become the title chip; the validation box stays
+        // empty so it only ever carries a problem the user must act on now.
+        const { errors, errorKind, ...editable } = cfg;
+        editingErrors = errors ?? [];
+        editForm = { ...editable, env: editable.env.map((pair) => ({ ...pair })) };
         showEditor();
       })
       .catch((e) => {
@@ -369,6 +428,7 @@
 
   function openCreate() {
     errorMessage = "";
+    editingErrors = [];
     confirmDelete = false;
     isSaving = false;
     isCreateMode = true;
@@ -382,13 +442,24 @@
     lastFocused = document.activeElement as HTMLElement | null;
     editorOpen = true;
     await tick();
+    // A fresh open starts at the top; a previous session's scroll is not wanted.
+    if (editorBodyEl) editorBodyEl.scrollTop = 0;
     nameInputEl?.focus();
+  }
+
+  /** Reports a save-blocking problem and scrolls it into view, so a message that
+   * lands at the bottom of the form is never missed. */
+  async function failValidation(message: string) {
+    errorMessage = message;
+    await tick();
+    editorErrorEl?.scrollIntoView({ block: "nearest" });
   }
 
   function closeEditor() {
     editorOpen = false;
     confirmDelete = false;
     errorMessage = "";
+    editingErrors = [];
     isCreateMode = false;
     // Return focus to whatever opened the editor.
     lastFocused?.focus?.();
@@ -479,6 +550,7 @@
       y: Math.min(e.clientY, window.innerHeight - h - 10),
       name: app.name,
       enabled: app.enabled,
+      error: !!app.errors?.length,
     };
   }
 
@@ -486,12 +558,43 @@
     rowMenu = { ...rowMenu, visible: false };
   }
 
+  // ── Cursor tooltip ───────────────────────────────────────────────────────
+
+  /** Shows a row's config errors at the pointer, if it has any. */
+  function showHoverTip(e: MouseEvent, app: AppStateInfo) {
+    if (!app.errors?.length) return;
+    hoverTip = { visible: true, x: e.clientX, y: e.clientY, items: app.errors };
+    tipPos = { left: e.clientX + 14, top: e.clientY + 14 };
+  }
+
+  function moveHoverTip(e: MouseEvent) {
+    if (!hoverTip.visible) return;
+    hoverTip = { ...hoverTip, x: e.clientX, y: e.clientY };
+  }
+
+  function hideHoverTip() {
+    if (hoverTip.visible) hoverTip = { ...hoverTip, visible: false };
+  }
+
+  // Flip the tooltip to the other side of the cursor when it would cross the
+  // right or bottom edge, so a message is never clipped off-window.
+  $effect(() => {
+    if (!hoverTip.visible || !tipEl) return;
+    const r = tipEl.getBoundingClientRect();
+    const pad = 12;
+    let left = hoverTip.x + 14;
+    let top = hoverTip.y + 14;
+    if (left + r.width > window.innerWidth - pad) left = hoverTip.x - 14 - r.width;
+    if (top + r.height > window.innerHeight - pad) top = hoverTip.y - 14 - r.height;
+    tipPos = { left: Math.max(pad, left), top: Math.max(pad, top) };
+  });
+
   async function toggleEnabled(appName: string, target: boolean) {
     closeRowMenu();
     try {
       const configs = await getFullConfig();
       const cfg = configs[appName];
-      if (!cfg) return;
+      if (!cfg || cfg.errors?.length) return;
       await updateAppConfig(appName, { ...cfg, enabled: target });
       await refreshFromConfig();
     } catch (e) {
@@ -506,7 +609,7 @@
     try {
       const configs = await getFullConfig();
       const cfg = configs[appName];
-      if (!cfg) return;
+      if (!cfg || cfg.errors?.length) return;
       // Pause, let the core's debounce stop it, then resume.
       await updateAppConfig(appName, { ...cfg, enabled: false });
       await refreshFromConfig();
@@ -577,11 +680,11 @@
     const name = editForm.name.trim();
     const command = editForm.command.trim();
     if (!name) {
-      errorMessage = "Give the app a name.";
+      await failValidation("Give the app a name.");
       return;
     }
     if (!command) {
-      errorMessage = "A command is required — pick or type the executable to run.";
+      await failValidation("A command is required — pick or type the executable to run.");
       return;
     }
     // The bulk text that is not parseable must not be silently dropped.
@@ -589,7 +692,7 @@
       const result = envFromText(envTextInput);
       if (result.issues.length > 0) {
         envIssues = result.issues;
-        errorMessage = `Fix the highlighted lines first: ${result.issues[0].message}`;
+        await failValidation(`Fix the highlighted lines first: ${result.issues[0].message}`);
         return;
       }
       // Text mode is still the live view: adopt what it parses right now,
@@ -599,7 +702,7 @@
 
     const unnamed = editForm.env.some((pair) => !pair.key.trim() && pair.value.trim() !== "");
     if (unnamed) {
-      errorMessage = 'Every variable needs a name before the "=".';
+      await failValidation('Every variable needs a name before the "=".');
       return;
     }
     const env: EnvVar[] = normalizeEnv(editForm.env);
@@ -609,8 +712,8 @@
     try {
       if (isCreateMode) {
         const configs = await getFullConfig();
-        if (configs[name]) {
-          errorMessage = `"${name}" already exists. Choose another name.`;
+        if (configs[name] && !configs[name].errors?.length) {
+          await failValidation(`"${name}" already exists. Choose another name.`);
           return;
         }
       }
@@ -618,7 +721,7 @@
       await refreshFromConfig();
       closeEditor();
     } catch (e) {
-      errorMessage = `Could not save: ${e}`;
+      await failValidation(`Could not save: ${e}`);
     } finally {
       isSaving = false;
     }
@@ -632,7 +735,7 @@
       await refreshFromConfig();
       closeEditor();
     } catch (e) {
-      errorMessage = `Could not delete: ${e}`;
+      await failValidation(`Could not delete: ${e}`);
     } finally {
       isSaving = false;
     }
@@ -645,7 +748,45 @@
   <Titlebar {maximized} tally={tallyForDisplay} onAdd={openCreate} themeSetting={themeSetting} {prefersDark} onSelectTheme={selectTheme} />
 
   <div class="body">
-    {#if appList.length === 0}
+    {#if configError}
+      <div class="cfg-error" role="alert">
+        <strong>The config file could not be read.</strong>
+        <span class="cfg-error-msg">{configError}</span>
+        <span class="cfg-error-fix">Fix or delete config.toml and it reloads automatically.</span>
+      </div>
+    {/if}
+
+    {#if configIssues.length > 0}
+      <div class="cfg-issues" role="alert">
+        <div class="cfg-issues-head">
+          <strong>
+            {configIssues.length}
+            {configIssues.length === 1 ? "entry has malformed TOML" : "entries have malformed TOML"}
+          </strong>
+          <span>They stay in the file until fixed or removed.</span>
+        </div>
+        <ul class="cfg-issue-list">
+          {#each configIssues as issue (issue.name)}
+            <li class="cfg-issue">
+              <span class="cfg-issue-name">{issue.name}</span>
+              <span class="cfg-issue-msg" title={configErrorTooltip(issue.messages)}>
+                {issue.messages[0]}{issue.messages.length > 1 ? ` (+${issue.messages.length - 1})` : ""}
+              </span>
+              <button class="ghost sm" type="button" onclick={() => openEditor(issue.name)}>
+                Edit
+              </button>
+            </li>
+          {/each}
+        </ul>
+        <div class="cfg-issues-foot">
+          <button class="ghost sm" type="button" onclick={autoFixConfig} disabled={isRepairing}>
+            {isRepairing ? "Repairing…" : "Auto-fix all"}
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    {#if appList.length === 0 && configIssues.length === 0 && !configError}
       <div class="empty">
         <h1>Nothing supervised yet</h1>
         <p>
@@ -654,7 +795,7 @@
         </p>
         <button class="ghost" type="button" onclick={openCreate}>Add your first app</button>
       </div>
-    {:else}
+    {:else if appList.length > 0}
       <div class="ledger-wrap">
         <table class="ledger">
           <thead>
@@ -672,6 +813,9 @@
                 ondblclick={() => openEditor(app.name)}
                 oncontextmenu={(e) => openRowMenu(e, app)}
                 class:disabled={!app.enabled}
+                onmouseenter={(e) => showHoverTip(e, app)}
+                onmousemove={moveHoverTip}
+                onmouseleave={hideHoverTip}
               >
                 <td class="c-app">
                   <div class="app-cell">
@@ -687,7 +831,7 @@
                 </td>
                 <td class="c-pid num tnum">{displayPid(app)}</td>
                 <td class="c-restarts num tnum">
-                  {#if !coreConnected}
+                  {#if app.errors?.length || !coreConnected}
                     <span class="muted">—</span>
                   {:else if app.restartCount > 0}
                     <span class="restarted">{app.restartCount}</span>
@@ -731,6 +875,15 @@
 
 <ResizeHandles />
 
+<!-- Config-error tooltip, anchored at the pointer -->
+{#if hoverTip.visible}
+  <div class="hover-tip" bind:this={tipEl} style="top: {tipPos.top}px; left: {tipPos.left}px;" role="tooltip">
+    {#each hoverTip.items as item (item)}
+      <div class="hover-tip-line">{item}</div>
+    {/each}
+  </div>
+{/if}
+
 <!-- Row actions -->
 {#if rowMenu.visible}
   <div
@@ -744,39 +897,54 @@
   ></div>
   <div class="rowmenu" style="top: {rowMenu.y}px; left: {rowMenu.x}px;" role="menu">
     <div class="rowmenu-head">{rowMenu.name}</div>
-    {#if rowMenu.enabled}
-      <button class="rowmenu-item" role="menuitem" onclick={() => restartApp(rowMenu.name)}>
-        {restarting[rowMenu.name] ? "Restarting…" : "Restart"}
-      </button>
-      <button class="rowmenu-item" role="menuitem" onclick={() => toggleEnabled(rowMenu.name, false)}>
-        Pause
+    {#if rowMenu.error}
+      <!-- An entry with a config value error cannot run, so only editing it
+           applies; Restart/Pause/Log would be dead controls. -->
+      <button
+        class="rowmenu-item"
+        role="menuitem"
+        onclick={() => {
+          closeRowMenu();
+          openEditor(rowMenu.name);
+        }}
+      >
+        Edit…
       </button>
     {:else}
-      <button class="rowmenu-item" role="menuitem" onclick={() => toggleEnabled(rowMenu.name, true)}>
-        Resume
+      {#if rowMenu.enabled}
+        <button class="rowmenu-item" role="menuitem" onclick={() => restartApp(rowMenu.name)}>
+          {restarting[rowMenu.name] ? "Restarting…" : "Restart"}
+        </button>
+        <button class="rowmenu-item" role="menuitem" onclick={() => toggleEnabled(rowMenu.name, false)}>
+          Pause
+        </button>
+      {:else}
+        <button class="rowmenu-item" role="menuitem" onclick={() => toggleEnabled(rowMenu.name, true)}>
+          Resume
+        </button>
+      {/if}
+      <div class="rowmenu-sep"></div>
+      <button
+        class="rowmenu-item"
+        role="menuitem"
+        onclick={() => {
+          closeRowMenu();
+          openLogPanel(rowMenu.name);
+        }}
+      >
+        View log…
+      </button>
+      <button
+        class="rowmenu-item"
+        role="menuitem"
+        onclick={() => {
+          closeRowMenu();
+          openEditor(rowMenu.name);
+        }}
+      >
+        Edit…
       </button>
     {/if}
-    <div class="rowmenu-sep"></div>
-    <button
-      class="rowmenu-item"
-      role="menuitem"
-      onclick={() => {
-        closeRowMenu();
-        openLogPanel(rowMenu.name);
-      }}
-    >
-      View log…
-    </button>
-    <button
-      class="rowmenu-item"
-      role="menuitem"
-      onclick={() => {
-        closeRowMenu();
-        openEditor(rowMenu.name);
-      }}
-    >
-      Edit…
-    </button>
   </div>
 {/if}
 
@@ -794,6 +962,17 @@
   >
     <header class="panel-head">
       <h2 id="editor-title">{isCreateMode ? "Add app" : editingOriginalName}</h2>
+      {#if editingErrors.length > 0}
+        <span class="err-chip" title={configErrorTooltip(editingErrors)} role="status">
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+            <circle cx="6" cy="6" r="5.2" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <path d="M6 3.4v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            <circle cx="6" cy="8.7" r="0.7" fill="currentColor" />
+          </svg>
+          {editingErrors.length} error{editingErrors.length === 1 ? "" : "s"}
+        </span>
+      {/if}
+      <span class="grow"></span>
       <button class="panel-x" type="button" aria-label="Close" onclick={closeEditor}>
         <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
           <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.4" />
@@ -821,7 +1000,7 @@
         </button>
       </footer>
     {:else}
-      <div class="panel-body">
+      <div class="panel-body" bind:this={editorBodyEl}>
         <form
           class="form"
           onsubmit={(e) => {
@@ -1027,7 +1206,7 @@
           </label>
 
           {#if errorMessage}
-            <p class="error span2" role="alert">{errorMessage}</p>
+            <p class="error span2" role="alert" bind:this={editorErrorEl}>{errorMessage}</p>
           {/if}
 
           <button class="submit-hidden" type="submit" tabindex="-1" aria-hidden="true"></button>
@@ -1132,6 +1311,96 @@
     padding: var(--s-24);
     overflow: hidden;
     display: flex;
+    flex-direction: column;
+    gap: var(--s-16);
+  }
+
+  /* ── Config issues ────────────────────────────────────────────────────────
+     Degraded tone (amber), not failure: the file is readable and the rest of the
+     config is live, only these entries need attention. */
+  .cfg-error {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s-8) var(--s-12);
+    padding: var(--s-16) var(--s-20);
+    background: var(--alert-wash);
+    border: 1px solid var(--alert);
+    border-radius: var(--r-card);
+    color: var(--alert);
+  }
+  .cfg-error strong {
+    font-size: var(--text-body-sm);
+    font-weight: var(--w-medium);
+  }
+  .cfg-error-msg {
+    font-size: var(--text-caption);
+  }
+  /* The recovery line takes the full width so it reads as the next step, not a
+     fourth fragment of the headline. */
+  .cfg-error-fix {
+    flex-basis: 100%;
+    font-size: var(--text-caption);
+    color: var(--graphite);
+  }
+
+  .cfg-issues {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-12);
+    padding: var(--s-16) var(--s-20);
+    background: var(--parchment);
+    border: 1px solid var(--degraded);
+    border-radius: var(--r-card);
+  }
+  .cfg-issues-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s-8) var(--s-12);
+  }
+  .cfg-issues-head strong {
+    font-size: var(--text-body-sm);
+    font-weight: var(--w-medium);
+    color: var(--degraded);
+  }
+  .cfg-issues-head span {
+    font-size: var(--text-caption);
+    color: var(--graphite);
+  }
+  .cfg-issue-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-8);
+  }
+  .cfg-issue {
+    display: flex;
+    align-items: center;
+    gap: var(--s-12);
+  }
+  .cfg-issue-name {
+    flex: none;
+    font-size: var(--text-body-sm);
+    font-weight: var(--w-medium);
+    color: var(--ink);
+  }
+  .cfg-issue-msg {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-caption);
+    color: var(--graphite);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cfg-issues-foot {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .foot {
@@ -1242,12 +1511,19 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
+    /* Two static lines: name and command. The error rides the tooltip instead
+       of a third line, so every row keeps the same rhythm. */
+    height: 34px;
+    justify-content: center;
   }
   .app-name {
     font-size: var(--text-body-sm);
     font-weight: var(--w-medium);
     color: var(--ink);
     letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .app-cmd {
     font-size: var(--text-caption);
@@ -1412,6 +1688,26 @@
     pointer-events: none;
   }
 
+  /* ── Cursor tooltip ─────────────────────────────────────────────────────── */
+  /* Config errors at the pointer. Above the row menu's scrim (never under a
+     modal) and pointer-events:none so it cannot steal the hover. */
+  .hover-tip {
+    position: fixed;
+    z-index: 80;
+    max-width: 46ch;
+    padding: var(--s-8) var(--s-12);
+    background: var(--canvas);
+    border: 1px solid var(--ink);
+    border-radius: var(--r-input);
+    pointer-events: none;
+  }
+  .hover-tip-line {
+    font-size: var(--text-caption);
+    color: var(--alert);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
   /* ── Row menu ───────────────────────────────────────────────────────────── */
   .scrim {
     position: fixed;
@@ -1542,6 +1838,22 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* Config-load problems, shown beside the title. Not the validation box: that
+     is reserved for a problem the user must act on to save. */
+  .err-chip {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-4);
+    padding: 2px var(--s-8);
+    border: 1px solid var(--alert);
+    border-radius: var(--r-pill);
+    color: var(--alert);
+    font-size: var(--text-caption);
+    font-weight: var(--w-medium);
+    white-space: nowrap;
+    cursor: help;
   }
   .panel-x {
     flex: none;

@@ -4,8 +4,8 @@
 //! the core detects the change via its file watcher and reconciles. The UI never
 //! sends commands to the core.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -14,7 +14,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use kandel_config::{
-    format_args, parse_args, save_config_preserving, App, ConfigError, EnvVar, DEFAULT_CONFIG,
+    format_args, parse_args, save_config_preserving, save_config_preserving_removing, App,
+    ConfigError, EnvVar, InvalidEntry, InvalidKind, LoadedConfig, DEFAULT_CONFIG,
 };
 
 /// Shared UI state: the resolved config path.
@@ -69,6 +70,28 @@ pub struct AppConfig {
     pub stop_timeout_sec: i64,
     /// Whether the process's stdout/stderr are captured into its log.
     pub capture_output: bool,
+    /// Why the entry failed to load, or empty when it loaded cleanly.
+    ///
+    /// A non-empty list means the entry is on disk but invalid, and the other
+    /// fields hold a best-effort draft so it can be shown and edited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    /// Which kind of problem `errors` describes.
+    ///
+    /// `structural` is a TOML-writing problem the repair flow can rewrite;
+    /// `value` is a bad value shown as an entry in an error state and edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<AppErrorKind>,
+}
+
+/// The kind of problem an entry's `error` describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppErrorKind {
+    /// A TOML-writing problem: unknown key, wrong type, non-table entry.
+    Structural,
+    /// A bad value: an empty or unresolvable command, a bad placeholder.
+    Value,
 }
 
 impl AppConfig {
@@ -89,7 +112,21 @@ impl AppConfig {
             max_retries: app.max_retries,
             stop_timeout_sec: app.stop_timeout_sec,
             capture_output: app.capture_output,
+            errors: Vec::new(),
+            error_kind: None,
         }
+    }
+
+    /// Converts a rejected entry into a DTO carrying its draft and the reasons.
+    pub fn from_invalid(entry: InvalidEntry) -> Self {
+        let mut dto = Self::from_app(&entry.draft);
+        dto.name = entry.name;
+        dto.errors = entry.messages;
+        dto.error_kind = Some(match entry.kind {
+            InvalidKind::Structural => AppErrorKind::Structural,
+            InvalidKind::Value => AppErrorKind::Value,
+        });
+        dto
     }
 
     /// Converts the DTO into an [`App`], parsing the shell-formatted args.
@@ -117,16 +154,17 @@ impl AppConfig {
     }
 }
 
-/// Loads the config, returning an empty map (and writing the sample config)
-/// when the file does not exist yet.
-fn load_or_bootstrap(path: &PathBuf) -> Result<BTreeMap<String, App>, ConfigError> {
+/// Loads the config leniently, bootstrapping the sample config if the file is
+/// missing. Only a whole-file failure is an error; a bad entry never fails the
+/// load.
+fn load_lenient(path: &Path) -> Result<LoadedConfig, ConfigError> {
     if !path.exists() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(path, DEFAULT_CONFIG);
     }
-    kandel_config::load_config(path)
+    kandel_config::load_config_lenient(path)
 }
 
 /// Information shown in the About dialog.
@@ -185,18 +223,29 @@ fn open_external(url: &str) -> std::io::Result<()> {
 }
 
 /// Reads `config.toml` and returns every entry as an [`AppConfig`].
+///
+/// Invalid entries are included with `errors` set, so the UI can list and repair
+/// them rather than losing an entry it cannot see.
 #[tauri::command]
 pub fn get_full_config(state: State<'_, UiState>) -> Result<BTreeMap<String, AppConfig>, String> {
     let path = state.config_path();
-    let apps = load_or_bootstrap(&path).map_err(|e| format!("loading config: {e}"))?;
-    Ok(apps
-        .iter()
-        .map(|(k, v)| (k.clone(), AppConfig::from_app(v)))
-        .collect())
+    let loaded = load_lenient(&path).map_err(|e| format!("loading config: {e}"))?;
+    let LoadedConfig { apps, invalid } = loaded;
+    let mut out: BTreeMap<String, AppConfig> = apps
+        .into_iter()
+        .map(|(name, app)| (name, AppConfig::from_app(&app)))
+        .collect();
+    for (name, entry) in invalid {
+        out.insert(name, AppConfig::from_invalid(entry));
+    }
+    Ok(out)
 }
 
 /// Saves `cfg` to `config.toml`. When `old_name != cfg.name` the entry is
 /// renamed (the old key is removed).
+///
+/// Saving never deletes an entry that failed to parse, so it cannot destroy a
+/// broken entry the user can still repair.
 #[tauri::command]
 pub fn update_app_config(
     state: State<'_, UiState>,
@@ -204,30 +253,115 @@ pub fn update_app_config(
     cfg: AppConfig,
 ) -> Result<(), String> {
     let path = state.config_path();
-    let mut apps = load_or_bootstrap(&path).map_err(|e| format!("loading current config: {e}"))?;
+    let loaded = load_lenient(&path).map_err(|e| format!("loading current config: {e}"))?;
+    let LoadedConfig { mut apps, .. } = loaded;
 
-    if old_name != cfg.name {
+    // A rename replaces the old key, even a broken one: the user is replacing it.
+    let renaming = old_name != cfg.name;
+    if renaming {
         apps.remove(&old_name);
     }
 
-    let mut app = cfg.to_app().map_err(|e| format!("{e}"))?;
-    app.name = cfg.name.clone();
-    apps.insert(cfg.name.clone(), app);
+    // No validation here: a value the loader rejects (an unresolvable command,
+    // say) shows up as that one entry's issue after the reload. `to_app` already
+    // copies the name, so it is not set again.
+    let app = cfg.to_app().map_err(|e| format!("{e}"))?;
+    apps.insert(cfg.name, app);
 
-    save_config_preserving(&path, &apps).map_err(|e| format!("saving config: {e}"))
+    // A rename removes the old key explicitly: it may replace a broken entry,
+    // which the preserving save would otherwise keep.
+    let remove = if renaming {
+        BTreeSet::from([old_name])
+    } else {
+        BTreeSet::new()
+    };
+
+    save_config_preserving_removing(&path, &apps, &remove)
+        .map_err(|e| format!("saving config: {e}"))
 }
 
 /// Removes the entry named `name` from `config.toml`.
+///
+/// The name is passed to the removing save explicitly: a broken entry the user
+/// can see must be removable even though it never loaded.
 #[tauri::command]
 pub fn delete_app_config(state: State<'_, UiState>, name: String) -> Result<(), String> {
     let path = state.config_path();
-    let mut apps = load_or_bootstrap(&path).map_err(|e| format!("loading current config: {e}"))?;
+    let loaded = load_lenient(&path).map_err(|e| format!("loading current config: {e}"))?;
+    let LoadedConfig { mut apps, invalid } = loaded;
 
-    if apps.remove(&name).is_none() {
+    let known = apps.remove(&name).is_some() || invalid.contains_key(&name);
+    if !known {
         return Err(format!("app {name:?} not found in config"));
     }
 
-    save_config_preserving(&path, &apps).map_err(|e| format!("saving config: {e}"))
+    let remove = BTreeSet::from([name]);
+    save_config_preserving_removing(&path, &apps, &remove)
+        .map_err(|e| format!("saving config: {e}"))
+}
+
+/// Best-effort repair of the entries whose TOML is malformed.
+///
+/// Only *structural* problems are rewritten from the draft. A *value* problem
+/// is left alone: the entry is already editable, and rewriting it would drop the
+/// value the user meant to keep.
+#[tauri::command]
+pub fn repair_config(state: State<'_, UiState>) -> Result<RepairReport, String> {
+    let path = state.config_path();
+    let loaded = load_lenient(&path).map_err(|e| format!("loading config: {e}"))?;
+    let LoadedConfig { mut apps, invalid } = loaded;
+
+    let mut repaired = Vec::new();
+    let mut skipped = Vec::new();
+    for (name, entry) in invalid {
+        // Value problems are surfaced as entries, not rewritten here.
+        if entry.kind != InvalidKind::Structural {
+            continue;
+        }
+        let mut draft = entry.draft;
+        draft.name = name.clone();
+        // A draft can still be invalid (for example a missing command, which
+        // cannot be invented). Only write back entries that now validate.
+        match draft.validate() {
+            Ok(()) => {
+                repaired.push(name.clone());
+                apps.insert(name, draft);
+            }
+            Err(e) => skipped.push(RepairSkip {
+                name,
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    if repaired.is_empty() {
+        return Ok(RepairReport { repaired, skipped });
+    }
+
+    // The fixed entries are overwritten by the write; the value errors stay on
+    // disk, untouched, because the preserving save skips them.
+    save_config_preserving(&path, &apps).map_err(|e| format!("saving config: {e}"))?;
+    Ok(RepairReport { repaired, skipped })
+}
+
+/// Summary of a [`repair_config`] run.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairReport {
+    /// Entries that were rewritten and now load.
+    pub repaired: Vec<String>,
+    /// Entries that could not be repaired automatically.
+    pub skipped: Vec<RepairSkip>,
+}
+
+/// An entry that could not be repaired automatically.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairSkip {
+    /// The entry's name.
+    pub name: String,
+    /// Why it could not be repaired.
+    pub reason: String,
 }
 
 /// Returns the executable/script extensions accepted by this Windows environment.
@@ -338,6 +472,8 @@ mod tests {
             max_retries: 5,
             stop_timeout_sec: 10,
             capture_output: true,
+            errors: Vec::new(),
+            error_kind: None,
         };
 
         let app = dto.to_app().unwrap();
@@ -377,6 +513,8 @@ mod tests {
             max_retries: -1,
             stop_timeout_sec: 5,
             capture_output: true,
+            errors: Vec::new(),
+            error_kind: None,
         };
         assert!(dto.to_app().is_err());
     }

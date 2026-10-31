@@ -10,8 +10,10 @@ import {
   formatClock,
   formatCommandLine,
   isSupportedCommandFile,
+  insertionIndex,
   logRows,
   mergeLedgerRows,
+  moveItem,
   normalizeEnv,
   parseArgs,
   rowsFromConfig,
@@ -392,37 +394,37 @@ describe("stateView", () => {
 
 describe("summarize", () => {
   it("counts total, running, and attention", () => {
-    const apps = {
-      a: status({ name: "a", state: "Running" }),
-      b: status({ name: "b", state: "Failed" }),
-      c: status({ name: "c", state: "Running" }),
-    };
+    const apps = [
+      status({ name: "a", state: "Running" }),
+      status({ name: "b", state: "Failed" }),
+      status({ name: "c", state: "Running" }),
+    ];
     expect(summarize(apps)).toEqual({ total: 3, running: 2, attention: 1 });
   });
 
   it("is zeroed for an empty ledger", () => {
-    expect(summarize({})).toEqual({ total: 0, running: 0, attention: 0 });
+    expect(summarize([])).toEqual({ total: 0, running: 0, attention: 0 });
   });
 });
 
 describe("rowsFromConfig", () => {
-  it("builds a row per config entry", () => {
-    const rows = rowsFromConfig({
-      api: { enabled: true, command: "node" },
-      paused: { enabled: false, command: "worker.exe" },
-    });
-    expect(Object.keys(rows).sort()).toEqual(["api", "paused"]);
-    expect(rows.api.command).toBe("node");
-    expect(rows.paused.enabled).toBe(false);
+  it("builds a row per config entry, in input order", () => {
+    const rows = rowsFromConfig([
+      { name: "api", enabled: true, command: "node" },
+      { name: "paused", enabled: false, command: "worker.exe" },
+    ]);
+    expect(rows.map((r) => r.name)).toEqual(["api", "paused"]);
+    expect(rows[0].command).toBe("node");
+    expect(rows[1].enabled).toBe(false);
   });
 
   it("marks an unreported entry as Unknown, not a lifecycle guess", () => {
     // "Starting" would claim a launch is in progress and "Stopped" that it had
     // already exited; neither is known before a core reports.
-    const rows = rowsFromConfig({ a: { enabled: true, command: "x" } });
-    expect(rows.a.state).toBe("Unknown");
-    expect(rows.a.pid).toBe(0);
-    expect(rows.a.restartCount).toBe(0);
+    const rows = rowsFromConfig([{ name: "a", enabled: true, command: "x" }]);
+    expect(rows[0].state).toBe("Unknown");
+    expect(rows[0].pid).toBe(0);
+    expect(rows[0].restartCount).toBe(0);
   });
 
   it("renders an unknown state as its own tone", () => {
@@ -437,25 +439,32 @@ describe("rowsFromConfig", () => {
   });
 
   it("parses the config's args string into argv", () => {
-    const rows = rowsFromConfig({ a: { enabled: true, command: "x", args: '-c "hello world"' } });
-    expect(rows.a.args).toEqual(["-c", "hello world"]);
+    const rows = rowsFromConfig([
+      { name: "a", enabled: true, command: "x", args: '-c "hello world"' },
+    ]);
+    expect(rows[0].args).toEqual(["-c", "hello world"]);
   });
 
   it("defaults args to an empty list when the config omits them", () => {
-    const rows = rowsFromConfig({ a: { enabled: true, command: "x" } });
-    expect(rows.a.args).toEqual([]);
+    const rows = rowsFromConfig([{ name: "a", enabled: true, command: "x" }]);
+    expect(rows[0].args).toEqual([]);
   });
 
   it("returns nothing for an empty config", () => {
-    expect(rowsFromConfig({})).toEqual({});
+    expect(rowsFromConfig([])).toEqual([]);
   });
 
   it("shows an entry with a value error in an error state", () => {
-    const rows = rowsFromConfig({
-      broken: { enabled: true, command: "nope.exe", errors: ["command not found in PATH: nope"] },
-    });
-    expect(rows.broken.state).toBe("ConfigError");
-    expect(rows.broken.errors).toEqual(["command not found in PATH: nope"]);
+    const rows = rowsFromConfig([
+      {
+        name: "broken",
+        enabled: true,
+        command: "nope.exe",
+        errors: ["command not found in PATH: nope"],
+      },
+    ]);
+    expect(rows[0].state).toBe("ConfigError");
+    expect(rows[0].errors).toEqual(["command not found in PATH: nope"]);
   });
 });
 
@@ -489,74 +498,159 @@ describe("parseArgs", () => {
 
 describe("mergeLedgerRows (config wins on identity, live on state)", () => {
   it("shows config rows before any status arrives", () => {
-    const configs = { a: { enabled: true, command: "x" } };
-    expect(Object.keys(mergeLedgerRows(configs, {}))).toEqual(["a"]);
+    const configs = [{ name: "a", enabled: true, command: "x" }];
+    expect(mergeLedgerRows(configs, {}).map((r) => r.name)).toEqual(["a"]);
   });
 
   it("takes state and pid from live status", () => {
-    const configs = { a: { enabled: true, command: "x" } };
+    const configs = [{ name: "a", enabled: true, command: "x" }];
     const live = { a: status({ name: "a", state: "Running", pid: 99 }) };
-    const merged = mergeLedgerRows(configs, live);
-    expect(merged.a.state).toBe("Running");
-    expect(merged.a.pid).toBe(99);
+    const [row] = mergeLedgerRows(configs, live);
+    expect(row.state).toBe("Running");
+    expect(row.pid).toBe(99);
   });
 
   it("keeps the config's command even when live status is stale", () => {
     // The regression: a saved command edit must show immediately, not after the
     // core's next status lands (which waits out the stop timeout on a restart).
-    const configs = { a: { enabled: true, command: "new.exe", args: "--new" } };
+    const configs = [{ name: "a", enabled: true, command: "new.exe", args: "--new" }];
     const live = { a: status({ name: "a", command: "old.exe", args: ["--old"] }) };
-    const merged = mergeLedgerRows(configs, live);
-    expect(merged.a.command).toBe("new.exe");
-    expect(merged.a.args).toEqual(["--new"]);
+    const [row] = mergeLedgerRows(configs, live);
+    expect(row.command).toBe("new.exe");
+    expect(row.args).toEqual(["--new"]);
+  });
+
+  it("keeps the input order, which is the file order", () => {
+    const configs = [
+      { name: "zebra", enabled: true, command: "x" },
+      { name: "alpha", enabled: true, command: "x" },
+    ];
+    const live = {
+      zebra: status({ name: "zebra", state: "Running" }),
+      alpha: status({ name: "alpha", state: "Running" }),
+    };
+    expect(mergeLedgerRows(configs, live).map((r) => r.name)).toEqual(["zebra", "alpha"]);
   });
 
   it("drops a row removed from config even if live status lingers", () => {
     const live = { gone: status({ name: "gone", state: "Running" }) };
-    expect(mergeLedgerRows({}, live)).toEqual({});
+    expect(mergeLedgerRows([], live)).toEqual([]);
   });
 
   it("keeps a value error over a live status", () => {
-    const configs = {
-      broken: { enabled: true, command: "nope.exe", errors: ["command not found in PATH: nope"] },
-    };
+    const configs = [
+      {
+        name: "broken",
+        enabled: true,
+        command: "nope.exe",
+        errors: ["command not found in PATH: nope"],
+      },
+    ];
     // A stale live status must not mask the config error.
     const live = { broken: status({ name: "broken", state: "Running", pid: 42 }) };
-    const merged = mergeLedgerRows(configs, live);
-    expect(merged.broken.state).toBe("ConfigError");
-    expect(merged.broken.errors).toEqual(["command not found in PATH: nope"]);
-    expect(merged.broken.pid).toBe(0);
+    const [row] = mergeLedgerRows(configs, live);
+    expect(row.state).toBe("ConfigError");
+    expect(row.errors).toEqual(["command not found in PATH: nope"]);
+    expect(row.pid).toBe(0);
   });
 });
 
 describe("splitConfig", () => {
   it("routes a structural error to issues and keeps value errors as entries", () => {
-    const { entries, issues } = splitConfig({
-      ok: {},
-      bad_toml: { errors: ["unknown field `restart_delay`"], errorKind: "structural" },
-      bad_value: { errors: ["command not found in PATH: nope"], errorKind: "value" },
-    });
-    expect(Object.keys(entries).sort()).toEqual(["bad_value", "ok"]);
+    const { entries, issues } = splitConfig([
+      { name: "ok" },
+      { name: "bad_toml", errors: ["unknown field `restart_delay`"], errorKind: "structural" as const },
+      { name: "bad_value", errors: ["command not found in PATH: nope"], errorKind: "value" as const },
+    ]);
+    expect(entries.map((e) => e.name).sort()).toEqual(["bad_value", "ok"]);
     expect(issues).toEqual([
       { name: "bad_toml", messages: ["unknown field `restart_delay`"], kind: "structural" },
     ]);
   });
 
+  it("keeps the input order within each output", () => {
+    const { entries } = splitConfig([
+      { name: "zebra" },
+      { name: "alpha" },
+      { name: "mango" },
+    ]);
+    expect(entries.map((e) => e.name)).toEqual(["zebra", "alpha", "mango"]);
+  });
+
   it("collects every message for a multi-error entry", () => {
-    const { issues } = splitConfig({
-      bad: { errors: ["env[0] key is empty", "stop_timeout_sec must be >= 0"], errorKind: "structural" },
-    });
+    const { issues } = splitConfig([
+      {
+        name: "bad",
+        errors: ["env[0] key is empty", "stop_timeout_sec must be >= 0"],
+        errorKind: "structural" as const,
+      },
+    ]);
     expect(issues[0].messages).toHaveLength(2);
   });
 
   it("treats an entry without an error as an entry", () => {
-    const { entries, issues } = splitConfig({ a: {} });
-    expect(Object.keys(entries)).toEqual(["a"]);
+    const { entries, issues } = splitConfig([{ name: "a" }]);
+    expect(entries.map((e) => e.name)).toEqual(["a"]);
     expect(issues).toEqual([]);
   });
 
   it("returns nothing for an empty config", () => {
-    expect(splitConfig({})).toEqual({ entries: {}, issues: [] });
+    expect(splitConfig([])).toEqual({ entries: [], issues: [] });
+  });
+});
+
+describe("moveItem", () => {
+  const list = ["a", "b", "c", "d"];
+
+  it("moves an item down", () => {
+    expect(moveItem(list, 0, 2)).toEqual(["b", "c", "a", "d"]);
+  });
+
+  it("moves an item up", () => {
+    expect(moveItem(list, 3, 0)).toEqual(["d", "a", "b", "c"]);
+  });
+
+  it("is a no-op when the target is the same index", () => {
+    expect(moveItem(list, 1, 1)).toEqual(list);
+  });
+
+  it("clamps a target past either end", () => {
+    expect(moveItem(list, 0, 99)).toEqual(["b", "c", "d", "a"]);
+    expect(moveItem(list, 3, -5)).toEqual(["d", "a", "b", "c"]);
+  });
+
+  it("does not mutate the input", () => {
+    moveItem(list, 0, 2);
+    expect(list).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("ignores an out-of-range source", () => {
+    expect(moveItem(list, 9, 0)).toEqual(list);
+  });
+});
+
+describe("insertionIndex", () => {
+  const rows = [
+    { top: 0, height: 40 },
+    { top: 40, height: 40 },
+    { top: 80, height: 40 },
+  ];
+
+  it("returns the gap under the pointer, flipping at a row's midpoint", () => {
+    expect(insertionIndex(rows, 10)).toBe(0);
+    expect(insertionIndex(rows, 19)).toBe(0);
+    // At or past the first row's midpoint, the gap is below it.
+    expect(insertionIndex(rows, 20)).toBe(1);
+    expect(insertionIndex(rows, 45)).toBe(1);
+    expect(insertionIndex(rows, 65)).toBe(2);
+  });
+
+  it("returns the length when the pointer is below every row", () => {
+    expect(insertionIndex(rows, 1000)).toBe(3);
+  });
+
+  it("returns 0 for an empty list", () => {
+    expect(insertionIndex([], 500)).toBe(0);
   });
 });
 

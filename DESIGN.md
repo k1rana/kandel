@@ -142,8 +142,11 @@ gutter use 24px; the empty state breathes at 48px.
   the gear, holding the theme choice. Options are radio items with a trailing
   check, so the current setting is visible without cycling.
 - **Ledger** — a parchment card, 28px, with an ink-ruled micro-caps header and
-  one row per app: state charge, name, command line, state word, right-aligned
-  tabular PID and restart count.
+  one row per app: a drag grip, state charge, name, command line, state word,
+  right-aligned tabular PID and restart count. Rows are listed in the order of
+  the tables in `config.toml`; dragging a row's grip moves it. A held drag shows
+  a 2px ink insertion line at the drop boundary and dims the row in flight.
+  Arrow keys on a focused grip move the row, announced through a live region.
 - **State charge** — a 10px rounded square: lime (running), amber (starting,
   restarting, retrying), red (failed), hollow stone ring (stopped/paused). A real
   border, never a shadow. The state word carries the meaning; colour never stands

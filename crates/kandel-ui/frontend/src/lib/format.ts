@@ -4,25 +4,58 @@
 import type { AppStateInfo, ConfigIssue, EnvVar, LogEvent } from "./types";
 
 /**
- * Splits a config map into entries to list and structural problems to repair.
+ * Splits the ordered config entries into entries to list and structural
+ * problems to repair.
  *
  * A *value* error (an unresolvable command, say) stays in `entries`: it is shown
  * as a ledger row in an error state and fixed by editing. A *structural* error
- * (bad TOML writing) goes to `issues`, fixed by the repair flow.
+ * (bad TOML writing) goes to `issues`, fixed by the repair flow. Input order is
+ * the file order, so it is the ledger order; both outputs keep it.
  */
-export function splitConfig<T extends { errors?: string[]; errorKind?: "structural" | "value" }>(
-  configs: Record<string, T>,
-): { entries: Record<string, T>; issues: ConfigIssue[] } {
-  const entries: Record<string, T> = {};
+export function splitConfig<T extends { name: string; errors?: string[]; errorKind?: "structural" | "value" }>(
+  configs: T[],
+): { entries: T[]; issues: ConfigIssue[] } {
+  const entries: T[] = [];
   const issues: ConfigIssue[] = [];
-  for (const [name, cfg] of Object.entries(configs)) {
+  for (const cfg of configs) {
     if (cfg.errors?.length && cfg.errorKind === "structural") {
-      issues.push({ name, messages: cfg.errors, kind: "structural" });
+      issues.push({ name: cfg.name, messages: cfg.errors, kind: "structural" });
     } else {
-      entries[name] = cfg;
+      entries.push(cfg);
     }
   }
   return { entries, issues };
+}
+
+/** Moves the item at `from` to index `to`, returning a new array.
+ *
+ * `to` is the final resting index, so a move that would land outside the list is
+ * clamped to its ends. Both `from` and `to` are indices in the current list.
+ */
+export function moveItem<T>(list: T[], from: number, to: number): T[] {
+  if (from < 0 || from >= list.length) return [...list];
+  const target = Math.max(0, Math.min(list.length - 1, to));
+  if (from === target) return [...list];
+  const next = [...list];
+  const [item] = next.splice(from, 1);
+  next.splice(target, 0, item);
+  return next;
+}
+
+/** The gap index a pointer at `y` selects among the given row bounds.
+ *
+ * A row is "past" once the pointer crosses its vertical midpoint, so the drop
+ * target flips at the middle of each row rather than at its edge. Returns the
+ * length of `bounds` when the pointer sits below every row (drop at the end).
+ */
+export function insertionIndex(
+  bounds: { top: number; height: number }[],
+  y: number,
+): number {
+  for (let i = 0; i < bounds.length; i++) {
+    if (y < bounds[i].top + bounds[i].height / 2) return i;
+  }
+  return bounds.length;
 }
 
 /** Normalizes edited environment pairs into the persisted form.
@@ -293,6 +326,7 @@ export interface Tally {
  * The UI's `AppConfig` DTO satisfies this shape directly: it stores `args` as
  * one shell-formatted string, which {@link parseArgs} turns back into argv. */
 export interface ConfigEntry {
+  name: string;
   enabled: boolean;
   command: string;
   /** Shell-formatted arguments, as stored in the config DTO. */
@@ -380,20 +414,19 @@ export const PENDING_STATE = "Unknown";
  */
 export const CONFIG_ERROR_STATE = "ConfigError";
 
-/** Builds ledger rows from the config file.
+/** Builds ledger rows from the config file, in file order.
  *
- * Config is the source of truth for *which* entries exist, so the ledger is
- * complete the moment the window opens, before any status arrives and whether
- * or not a core is running. It supplies only what config knows: identity, the
- * command, and whether the entry is enabled. Runtime facts (state, PID, restart
- * count) are left unknown until a core reports them.
+ * Config is the source of truth for *which* entries exist and in *what order*,
+ * so the ledger is complete the moment the window opens, before any status
+ * arrives and whether or not a core is running. It supplies only what config
+ * knows: identity, the command, and whether the entry is enabled. Runtime facts
+ * (state, PID, restart count) are left unknown until a core reports them.
  */
-export function rowsFromConfig(configs: Record<string, ConfigEntry>): Record<string, AppStateInfo> {
-  const rows: Record<string, AppStateInfo> = {};
-  for (const [name, cfg] of Object.entries(configs)) {
+export function rowsFromConfig(configs: ConfigEntry[]): AppStateInfo[] {
+  return configs.map((cfg) => {
     const errors = cfg.errors?.length ? cfg.errors : undefined;
-    rows[name] = {
-      name,
+    return {
+      name: cfg.name,
       // An entry with a config error is shown in an error state, not as Unknown.
       state: errors ? CONFIG_ERROR_STATE : PENDING_STATE,
       pid: 0,
@@ -403,36 +436,34 @@ export function rowsFromConfig(configs: Record<string, ConfigEntry>): Record<str
       restartCount: 0,
       errors,
     };
-  }
-  return rows;
+  });
 }
 
-/** Merges config rows with live status into ledger rows.
+/** Merges ordered config rows with live status into ordered ledger rows.
  *
- * Config decides *what* an entry is (`enabled`, `command`, `args`), so an edit
- * saved to `config.toml` is reflected immediately; live status only supplies
- * *how* it is running (`state`, `pid`, `restartCount`). Taking the whole entry
- * from live status would hide a just-saved edit until the core's next status
- * lands — which, for a restart, waits out the graceful-stop timeout.
+ * Config decides *what* an entry is (`enabled`, `command`, `args`) and *where*
+ * it sits (its position in the file), so a saved edit or a reorder shows
+ * immediately; live status only supplies *how* it is running (`state`, `pid`,
+ * `restartCount`). Taking the whole entry from live status would hide a
+ * just-saved edit until the core's next status lands — which, for a restart,
+ * waits out the graceful-stop timeout.
+ *
+ * A live status with no config row is dropped: config is what defines the
+ * ledger, so a lingering status for a removed entry must not resurrect it.
  */
 export function mergeLedgerRows(
-  configs: Record<string, ConfigEntry>,
+  configs: ConfigEntry[],
   live: Record<string, AppStateInfo>,
-): Record<string, AppStateInfo> {
-  const merged: Record<string, AppStateInfo> = {};
-  for (const [name, row] of Object.entries(rowsFromConfig(configs))) {
+): AppStateInfo[] {
+  return rowsFromConfig(configs).map((row) => {
     // A config value error wins over any live status: the core skips an entry it
     // cannot resolve, so a row must report the error, not a last-known state.
-    if (row.errors?.length) {
-      merged[name] = row;
-      continue;
-    }
-    const status = live[name];
-    merged[name] = status
+    if (row.errors?.length) return row;
+    const status = live[row.name];
+    return status
       ? { ...status, enabled: row.enabled, command: row.command, args: row.args }
       : row;
-  }
-  return merged;
+  });
 }
 
 /** The hover text for a row's config errors: one line per problem. */
@@ -442,13 +473,12 @@ export function configErrorTooltip(errors: string[] | undefined): string {
 }
 
 /** Counts the ledger's apps and how many are healthy. */
-export function summarize(apps: Record<string, AppStateInfo>): Tally {
-  const list = Object.values(apps);
-  const running = list.filter((a) => stateView(a.state).healthy).length;
+export function summarize(apps: AppStateInfo[]): Tally {
+  const running = apps.filter((a) => stateView(a.state).healthy).length;
   return {
-    total: list.length,
+    total: apps.length,
     running,
-    attention: list.length - running,
+    attention: apps.length - running,
   };
 }
 

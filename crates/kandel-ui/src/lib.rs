@@ -53,6 +53,7 @@ pub fn run(config_path: PathBuf) {
             commands::get_about_info,
             commands::open_repository,
             commands::get_full_config,
+            commands::reorder_app_configs,
             commands::update_app_config,
             commands::delete_app_config,
             commands::repair_config,

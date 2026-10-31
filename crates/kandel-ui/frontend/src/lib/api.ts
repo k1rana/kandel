@@ -27,12 +27,24 @@ export function openRepository(): Promise<void> {
   return invoke("open_repository");
 }
 
-/** Loads every config entry keyed by app name.
+/** Loads every config entry, in the order its table appears in the file.
+ *
+ * The file order is the ledger order, so this is a list rather than a
+ * name-keyed map: a map would re-sort numeric-looking names and lose the order
+ * the user arranged.
  *
  * Invalid entries are included with `errors` and `errorKind` set, so the UI can
  * list value errors as rows and route structural ones to repair. */
-export function getFullConfig(): Promise<Record<string, AppConfig>> {
-  return invoke<Record<string, AppConfig>>("get_full_config");
+export function getFullConfig(): Promise<AppConfig[]> {
+  return invoke<AppConfig[]>("get_full_config");
+}
+
+/** Rewrites `config.toml` so its entries appear in `order`.
+ *
+ * The write is comment-preserving, and an entry the UI did not name (a broken
+ * one it cannot list) keeps its place in the file. */
+export function reorderAppConfigs(order: string[]): Promise<void> {
+  return invoke("reorder_app_configs", { order });
 }
 
 /** Rewrites entries with malformed TOML from their best-effort draft. */

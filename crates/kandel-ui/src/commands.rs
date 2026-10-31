@@ -4,7 +4,7 @@
 //! the core detects the change via its file watcher and reconciles. The UI never
 //! sends commands to the core.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -14,8 +14,9 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use kandel_config::{
-    format_args, parse_args, save_config_preserving, save_config_preserving_removing, App,
-    ConfigError, EnvVar, InvalidEntry, InvalidKind, LoadedConfig, DEFAULT_CONFIG,
+    config_order, format_args, parse_args, save_config_preserving, save_config_preserving_removing,
+    save_config_reordered, App, ConfigError, EnvVar, InvalidEntry, InvalidKind, LoadedConfig,
+    DEFAULT_CONFIG,
 };
 
 /// Shared UI state: the resolved config path.
@@ -222,23 +223,59 @@ fn open_external(url: &str) -> std::io::Result<()> {
     Command::new("xdg-open").arg(url).spawn().map(|_| ())
 }
 
-/// Reads `config.toml` and returns every entry as an [`AppConfig`].
+/// Reads `config.toml` and returns every entry as an [`AppConfig`], in the order
+/// the tables appear in the file.
+///
+/// The file order *is* the ledger order: the UI lists entries in the order the
+/// user arranged, so it must not be re-sorted on the way out. A JSON array (not
+/// a map) carries that order, which a keyed object would lose for numeric names.
 ///
 /// Invalid entries are included with `errors` set, so the UI can list and repair
 /// them rather than losing an entry it cannot see.
 #[tauri::command]
-pub fn get_full_config(state: State<'_, UiState>) -> Result<BTreeMap<String, AppConfig>, String> {
+pub fn get_full_config(state: State<'_, UiState>) -> Result<Vec<AppConfig>, String> {
     let path = state.config_path();
-    let loaded = load_lenient(&path).map_err(|e| format!("loading config: {e}"))?;
-    let LoadedConfig { apps, invalid } = loaded;
-    let mut out: BTreeMap<String, AppConfig> = apps
-        .into_iter()
-        .map(|(name, app)| (name, AppConfig::from_app(&app)))
-        .collect();
+    let LoadedConfig {
+        mut apps,
+        mut invalid,
+    } = load_lenient(&path).map_err(|e| format!("loading config: {e}"))?;
+
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out = Vec::with_capacity(apps.len() + invalid.len());
+    let mut seen = BTreeSet::new();
+    for name in config_order(&text) {
+        if let Some(app) = apps.remove(&name) {
+            seen.insert(name);
+            out.push(AppConfig::from_app(&app));
+        } else if let Some(entry) = invalid.remove(&name) {
+            seen.insert(name);
+            out.push(AppConfig::from_invalid(entry));
+        }
+    }
+    // Anything the parsed order missed (unreadable text, say) still appears,
+    // so a ledger row is never dropped just because its position is unknown.
+    for (name, app) in apps {
+        if seen.insert(name) {
+            out.push(AppConfig::from_app(&app));
+        }
+    }
     for (name, entry) in invalid {
-        out.insert(name, AppConfig::from_invalid(entry));
+        if seen.insert(name) {
+            out.push(AppConfig::from_invalid(entry));
+        }
     }
     Ok(out)
+}
+
+/// Rewrites `config.toml` so its entries appear in `order`.
+///
+/// The counterpart to the ordered read: the UI computes the new order of the
+/// rows it shows and the file is reordered to match, comments and all. An entry
+/// not named in `order` (a broken one the UI cannot list) keeps its place.
+#[tauri::command]
+pub fn reorder_app_configs(state: State<'_, UiState>, order: Vec<String>) -> Result<(), String> {
+    let path = state.config_path();
+    save_config_reordered(&path, &order).map_err(|e| format!("reordering config: {e}"))
 }
 
 /// Saves `cfg` to `config.toml`. When `old_name != cfg.name` the entry is

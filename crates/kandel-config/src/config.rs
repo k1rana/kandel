@@ -753,6 +753,160 @@ fn entry_to_table(app: &App) -> Result<toml_edit::Table, ConfigError> {
     Ok(doc.into_table())
 }
 
+/// Returns the top-level table names of `text`, in the order they appear.
+///
+/// The order of the tables in `config.toml` *is* the order of the entries: it is
+/// what the management UI lists, so reordering the file reorders the ledger.
+/// Text that does not parse yields an empty list, since there is then no
+/// meaningful order to report.
+pub fn config_order(text: &str) -> Vec<String> {
+    text.parse::<toml_edit::DocumentMut>()
+        .map(|doc| doc.iter().map(|(name, _)| name.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Writes `config.toml` with its entries reordered to match `order`.
+///
+/// A no-op (the file already matches) leaves the file untouched, byte for byte,
+/// so the watcher sees no change. A file that does not parse as TOML is reported
+/// as an error rather than silently ignored: the caller asked to reorder, and
+/// pretending it worked would leave the UI showing an order the disk rejects.
+///
+/// See [`reorder_toml`] for exactly what is preserved.
+pub fn save_config_reordered(path: &Path, order: &[String]) -> Result<(), ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    match reorder_toml(&text, order)? {
+        Some(body) => write_atomic(path, &body),
+        None => Ok(()),
+    }
+}
+
+/// Reorders the top-level tables in `text` to `order`, or `None` when nothing
+/// would change.
+///
+/// Only names present in `text` are honored, and only the table slots those
+/// names already occupy are reused: a name takes the position of the entry it
+/// displaces in file order. A table not named in `order` — a broken entry the UI
+/// cannot list, say — therefore stays where it is rather than being shuffled.
+///
+/// Each table's own leading comment and blank-line separator travel with it, the
+/// file header stays pinned above the first table, and the trailing region of
+/// the file (below the last table) is preserved. An explicit reorder may
+/// normalize the blank lines around moved tables; nothing else is rewritten.
+///
+/// Returns `Err` when `text` is not valid TOML, since there is no order to
+/// impose on a file that cannot be read.
+fn reorder_toml(text: &str, order: &[String]) -> Result<Option<String>, ConfigError> {
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| ConfigError::Parse(e.to_string()))?;
+
+    let names: Vec<String> = doc.iter().map(|(name, _)| name.to_string()).collect();
+    if names.is_empty() {
+        return Ok(None);
+    }
+
+    // The slots the reordered names occupy, in file order, and the names to
+    // place into them, in the requested order (unknown names dropped).
+    let slots: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| order.iter().any(|want| want == *name))
+        .map(|(i, _)| i)
+        .collect();
+    if slots.is_empty() {
+        return Ok(None);
+    }
+    let mut requested = order
+        .iter()
+        .filter(|name| names.iter().any(|n| n == *name))
+        .map(String::as_str);
+
+    let mut final_order = names.clone();
+    for slot in slots {
+        match requested.next() {
+            Some(name) => final_order[slot] = name.to_string(),
+            None => break,
+        }
+    }
+    if final_order == names {
+        return Ok(None);
+    }
+
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let first = names[0].clone();
+
+    // The file header lives in the first table's prefix, above its own comment.
+    let header = doc
+        .get(first.as_str())
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.decor().prefix())
+        .map(|decor| header_block(decor.as_str().unwrap_or_default(), eol))
+        .unwrap_or_default();
+
+    let mut out = toml_edit::DocumentMut::new();
+    for (i, name) in final_order.iter().enumerate() {
+        let Some(mut item) = doc.get(name.as_str()).cloned() else {
+            continue;
+        };
+        if let Some(table) = item.as_table_mut() {
+            let raw = table
+                .decor()
+                .prefix()
+                .map(|decor| decor.as_str().unwrap_or_default())
+                .unwrap_or_default();
+            // The first table's own comment excludes the file header split off
+            // above; every other table's prefix is already only its own.
+            let own = if name == &first {
+                table_block(raw, eol)
+            } else {
+                trim_leading_blanks(raw)
+            };
+            let prefix = if i == 0 {
+                format!("{header}{own}")
+            } else {
+                format!("{eol}{own}")
+            };
+            table.decor_mut().set_prefix(prefix);
+            // Reassigning the render position is unnecessary: insertion order
+            // determines it once the stored position is cleared.
+            table.set_position(None);
+        }
+        out.insert(name.as_str(), item);
+    }
+    out.set_trailing(doc.trailing().clone());
+    Ok(Some(out.to_string()))
+}
+
+/// The file header above the first table: everything in its prefix up to and
+/// including the blank line that separates it from the table's own comment.
+fn header_block<'a>(prefix: &'a str, eol: &str) -> &'a str {
+    let blank = format!("{eol}{eol}");
+    match prefix.find(&blank) {
+        Some(i) => &prefix[..i + blank.len()],
+        None => "",
+    }
+}
+
+/// The part of the first table's prefix that belongs to the table rather than to
+/// the file header.
+fn table_block<'a>(prefix: &'a str, eol: &str) -> &'a str {
+    let blank = format!("{eol}{eol}");
+    let body = match prefix.find(&blank) {
+        Some(i) => &prefix[i + blank.len()..],
+        None => prefix,
+    };
+    trim_leading_blanks(body)
+}
+
+/// Strips the blank-line separators that a rebuilt document re-adds itself.
+fn trim_leading_blanks(text: &str) -> &str {
+    text.trim_start_matches(['\n', '\r'])
+}
+
 /// Writes `body` to `path` atomically (temp file -> sync -> rename).
 fn write_atomic(path: &Path, body: &str) -> Result<(), ConfigError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -1824,5 +1978,214 @@ env = [
             "broken entry lingers:\n{got}"
         );
         assert!(got.contains("[\"good\"]"), "good entry was lost:\n{got}");
+    }
+
+    fn names(order: &[&str]) -> Vec<String> {
+        order.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn config_order_reports_table_order() {
+        let text = "[zebra]\ncommand = 'z.exe'\n\n[alpha]\ncommand = 'a.exe'\n\n[mango]\ncommand = 'm.exe'\n";
+        assert_eq!(config_order(text), names(&["zebra", "alpha", "mango"]));
+    }
+
+    #[test]
+    fn config_order_is_empty_for_unparsable_text() {
+        // There is no order to report from a file that cannot be read.
+        assert!(config_order("this is not toml = = =").is_empty());
+    }
+
+    #[test]
+    fn reorder_moves_a_table_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[web]\ncommand = 'cmd.exe'\n\n[worker]\ncommand = 'cmd.exe'\n\n[db]\ncommand = 'cmd.exe'\n",
+        )
+        .unwrap();
+
+        save_config_reordered(&path, &names(&["db", "web", "worker"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(config_order(&got), names(&["db", "web", "worker"]));
+        // The entries themselves are untouched and still load.
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.len(), 3);
+    }
+
+    #[test]
+    fn reorder_leaves_an_already_ordered_file_untouched() {
+        // Byte stability: the watcher must not see a spurious change from a
+        // reorder that would not change the order.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# header\n\n[web]\ncommand = 'cmd.exe'\n\n[worker]\ncommand = 'cmd.exe'\n";
+        std::fs::write(&path, original).unwrap();
+
+        save_config_reordered(&path, &names(&["web", "worker"])).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn reorder_keeps_the_file_header_and_per_entry_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# Kandel Configuration\n# keep me\n\n# web service\n[web]\ncommand = 'cmd.exe'\n\n# worker\n[worker]\ncommand = 'cmd.exe'\n";
+        std::fs::write(&path, original).unwrap();
+
+        save_config_reordered(&path, &names(&["worker", "web"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(config_order(&got), names(&["worker", "web"]));
+        // The file header stays at the top; each comment travels with its table.
+        assert!(
+            got.starts_with("# Kandel Configuration\n# keep me\n"),
+            "header moved:\n{got}"
+        );
+        let worker = got.find("# worker").unwrap();
+        let web = got.find("# web service").unwrap();
+        assert!(
+            worker < web,
+            "comments no longer precede their tables:\n{got}"
+        );
+    }
+
+    #[test]
+    fn reorder_keeps_a_table_it_was_not_asked_about_in_place() {
+        // A broken entry the UI cannot list must not be shuffled by a reorder of
+        // the entries it *can* see.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[good1]\ncommand = 'cmd.exe'\n\n[broken]\ncommand = 'cmd.exe'\nrestart_delay = 3\n\n[good2]\ncommand = 'cmd.exe'\n";
+        std::fs::write(&path, original).unwrap();
+
+        save_config_reordered(&path, &names(&["good2", "good1"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(config_order(&got), names(&["good2", "broken", "good1"]));
+        assert!(
+            got.contains("restart_delay = 3"),
+            "broken entry was rewritten:\n{got}"
+        );
+    }
+
+    #[test]
+    fn reorder_preserves_a_trailing_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original =
+            "[web]\ncommand = 'cmd.exe'\n\n[worker]\ncommand = 'cmd.exe'\n\n# trailing note\n";
+        std::fs::write(&path, original).unwrap();
+
+        save_config_reordered(&path, &names(&["worker", "web"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(config_order(&got), names(&["worker", "web"]));
+        assert!(
+            got.contains("# trailing note"),
+            "trailing comment lost:\n{got}"
+        );
+    }
+
+    #[test]
+    fn reorder_normalizes_line_endings_like_the_preserving_save() {
+        // `toml_edit` renders LF, so a rewrite normalizes CRLF — the same
+        // behavior as `save_config_preserving`. What matters is that the entries
+        // and their order survive the reorder.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# header\r\n\r\n[web]\r\ncommand = 'cmd.exe'\r\n\r\n[worker]\r\ncommand = 'cmd.exe'\r\n";
+        std::fs::write(&path, original).unwrap();
+
+        save_config_reordered(&path, &names(&["worker", "web"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(config_order(&got), names(&["worker", "web"]));
+        assert!(got.contains("# header"), "header lost:\n{got}");
+    }
+
+    #[test]
+    fn reorder_leaves_a_file_untouched_when_the_order_already_matches() {
+        // A no-op reorder must not rewrite the file at all, line endings
+        // included, so the watcher sees nothing and nothing is normalized.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# header\r\n\r\n[web]\r\ncommand = 'cmd.exe'\r\n\r\n[worker]\r\ncommand = 'cmd.exe'\r\n";
+        std::fs::write(&path, original).unwrap();
+
+        save_config_reordered(&path, &names(&["web", "worker"])).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn reorder_ignores_names_not_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[web]\ncommand = 'cmd.exe'\n\n[worker]\ncommand = 'cmd.exe'\n",
+        )
+        .unwrap();
+
+        save_config_reordered(&path, &names(&["ghost", "worker", "web"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(config_order(&got), names(&["worker", "web"]));
+    }
+
+    #[test]
+    fn reorder_rejects_a_file_that_does_not_parse() {
+        // A file that cannot be read has no order to impose; the caller must
+        // hear about it rather than believe the reorder landed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is not toml = = =").unwrap();
+
+        let err = save_config_reordered(&path, &names(&["a", "b"])).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn reorder_normalizes_quoted_and_bare_headers() {
+        // `toml_edit` renders a bare key header without the quotes the sample
+        // uses; a reorder may therefore normalize `["web"]` to `[web]`, but the
+        // entries and their order must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[\"PowerToys Awake\"]\ncommand = 'cmd.exe'\n\n[\"Dev Server\"]\ncommand = 'cmd.exe'\n",
+        )
+        .unwrap();
+
+        save_config_reordered(&path, &names(&["Dev Server", "PowerToys Awake"])).unwrap();
+
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            config_order(&got),
+            names(&["Dev Server", "PowerToys Awake"])
+        );
+    }
+
+    #[test]
+    fn a_full_reorder_round_trips_through_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[alpha]\ncommand = 'cmd.exe'\nrestart_delay_sec = 7\n\n[beta]\ncommand = 'cmd.exe'\nenabled = false\n\n[gamma]\ncommand = 'cmd.exe'\n";
+        std::fs::write(&path, original).unwrap();
+
+        let before = load_config(&path).unwrap();
+        save_config_reordered(&path, &names(&["gamma", "alpha", "beta"])).unwrap();
+        let after = load_config(&path).unwrap();
+
+        assert_eq!(
+            config_order(&std::fs::read_to_string(&path).unwrap()),
+            names(&["gamma", "alpha", "beta"])
+        );
+        assert_eq!(before, after);
     }
 }

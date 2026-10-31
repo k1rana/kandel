@@ -9,6 +9,7 @@
     getInitialStatuses,
     onConnectionChange,
     onStateUpdate,
+    reorderAppConfigs,
     repairConfig,
     selectCommandPath,
     updateAppConfig,
@@ -23,9 +24,11 @@
     extractAppNameFromPath,
     formatClock,
     formatCommandLine,
+    insertionIndex,
     isSupportedCommandFile,
     logRows,
     mergeLedgerRows,
+    moveItem,
     normalizeEnv,
     PENDING_STATE,
     sanitizeEnvKey,
@@ -52,13 +55,14 @@
   // ── Ledger state ────────────────────────────────────────────────
   // ── Ledger state ────────────────────────────────
   // Two sources, kept apart:
-  //   configEntries — every entry in config.toml (the source of truth)
+  //   configEntries — every entry in config.toml (the source of truth), in the
+  //                   order its table appears in the file
   //   liveApps      — statuses the core streams while attached
-  // The ledger merges them per field: config decides *which* rows exist and
-  // *what* they are (command, args, enabled), so a saved edit shows at once;
+  // The ledger merges them per field: config decides *which* rows exist, *what*
+  // they are (command, args, enabled), and *where* they sit (file order);
   // attached core status supplies *how* they run (state, pid, restart count).
   // While detached the second source is empty and the rows say so.
-  let configEntries = $state<Record<string, AppConfig>>({});
+  let configEntries = $state<AppConfig[]>([]);
   // Entries that are on disk but failed to load. Listed separately so a broken
   // entry is visible and repairable without being treated as a runnable app.
   let configIssues = $state<ConfigIssue[]>([]);
@@ -71,13 +75,10 @@
   // configured entry, but runtime facts (state, PID, restart count) are unknown,
   // so the rows say so instead of showing a last-known value that may be wrong.
   let coreConnected = $state(false);
-  let apps = $derived.by(() => mergeLedgerRows(configEntries, liveApps));
-  let appList = $derived(
-    Object.values(apps).sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-    ),
-  );
-  let tally = $derived(summarize(apps));
+  // Config decides the row order, so the merged list is already in file order;
+  // there is no separate sort to drift from it.
+  let appList = $derived(mergeLedgerRows(configEntries, liveApps));
+  let tally = $derived(summarize(appList));
   // While detached, the per-row state is unknown, so the "N running" half of the
   // tally would be a claim the UI cannot support. Report the count it does know.
   let tallyForDisplay = $derived(
@@ -172,9 +173,38 @@
   let nameInputEl = $state<HTMLInputElement | null>(null);
   let lastFocused = $state<HTMLElement | null>(null);
 
-  // ── Row menu state ───────────────────────────────────────────────────────
+  // ── Row menu state ──────────────────────────────────────────────
   let rowMenu = $state({ visible: false, x: 0, y: 0, name: "", enabled: false, error: false });
   let restarting = $state<Record<string, boolean>>({});
+
+  // ── Reorder (drag) ───────────────────────────────────────────────
+  // Rows are reordered by holding the grip and dragging: the file's table order
+  // is the list order, so a drop rewrites config.toml. Pointer events, not the
+  // HTML5 drag-and-drop API, because Tauri's file-drop handler owns that API on
+  // Windows and firing a file drop for an internal reorder would be wrong.
+  let drag = $state({ active: false, from: -1, gap: 0, moved: false, pointerId: -1 });
+  // Where the insertion line sits, in px from the top of the ledger's scroll
+  // content. Null when no drag is in progress.
+  let dropLineTop = $state<number | null>(null);
+  let ledgerTableEl = $state<HTMLTableElement | null>(null);
+  let ledgerWrapEl = $state<HTMLDivElement | null>(null);
+  // Pointer Y from the last move, so the auto-scroll tick can re-resolve the
+  // drop target after the list has scrolled under a stationary pointer.
+  let lastPointerY = 0;
+  let dragStartY = 0;
+  let autoScrollTimer: number | null = null;
+  let autoScrollSpeed = 0;
+
+  const DRAG_THRESHOLD_PX = 4;
+  const AUTO_SCROLL_EDGE_PX = 32;
+  const AUTO_SCROLL_MAX_PX = 16;
+
+  // True while a reorder write is in flight, so the list is not re-dragged under
+  // a stale order.
+  let isReordering = $state(false);
+  // Announced through a live region: a keyboard reorder must be perceivable
+  // without sight of the list.
+  let reorderAnnouncement = $state("");
 
   // ── Cursor tooltip state ─────────────────────────────────────────────────
   // Config errors ride a tooltip anchored at the pointer rather than a third
@@ -408,7 +438,7 @@
     envIssues = [];
     getFullConfig()
       .then((configs) => {
-        const cfg = configs[appName];
+        const cfg = configs.find((c) => c.name === appName);
         if (!cfg) {
           errorMessage = `No entry named "${appName}" in the config.`;
           return;
@@ -558,6 +588,161 @@
     rowMenu = { ...rowMenu, visible: false };
   }
 
+  // ── Reorder (drag + keyboard) ────────────────────────────────────
+
+  /** The ledger's rows, in render order, as laid out on screen. */
+  function rowElements(): HTMLElement[] {
+    return Array.from(ledgerTableEl?.querySelectorAll<HTMLElement>("tbody tr") ?? []);
+  }
+
+  /** The gap (0..rowCount) the pointer at `clientY` is hovering over. */
+  function gapAt(clientY: number): number {
+    const bounds = rowElements().map((row) => {
+      const r = row.getBoundingClientRect();
+      return { top: r.top, height: r.height };
+    });
+    return insertionIndex(bounds, clientY);
+  }
+
+  /** Paints the insertion line at `gap`, using row offsets so it tracks scroll. */
+  function showDropLine(gap: number) {
+    const rows = rowElements();
+    if (rows.length === 0) {
+      dropLineTop = null;
+      return;
+    }
+    const last = rows[rows.length - 1];
+    dropLineTop = gap >= rows.length ? last.offsetTop + last.offsetHeight : rows[gap].offsetTop;
+  }
+
+  function onGripPointerDown(e: PointerEvent, index: number) {
+    if (e.button !== 0) return;
+    // Keep the row's own handlers (dblclick to edit) out of the drag, and land
+    // focus on the grip so a subsequent arrow key moves the row the user just
+    // grabbed. Not `preventDefault`: that would swallow the focus.
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).focus();
+    dragStartY = e.clientY;
+    lastPointerY = e.clientY;
+    drag = { active: true, from: index, gap: index, moved: false, pointerId: e.pointerId };
+    autoScrollSpeed = 0;
+    autoScrollTimer = requestAnimationFrame(autoScrollStep);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!drag.active) return;
+    lastPointerY = e.clientY;
+    // A short hold before the drag "arms", so a plain click on the grip does not
+    // nudge the row by a pixel.
+    if (!drag.moved) {
+      if (Math.abs(e.clientY - dragStartY) < DRAG_THRESHOLD_PX) return;
+      drag = { ...drag, moved: true };
+    }
+    const gap = gapAt(e.clientY);
+    if (gap !== drag.gap) drag = { ...drag, gap };
+    showDropLine(gap);
+    updateAutoScrollSpeed(e.clientY);
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    if (!drag.active || e.pointerId !== drag.pointerId) return;
+    const { from, gap, moved } = drag;
+    endDrag();
+    if (!moved || from < 0) return;
+    // The gap counts the dragged row, which leaves the list, so a gap below its
+    // origin lands one index higher once it is removed.
+    const target = gap > from ? gap - 1 : gap;
+    if (target === from) return;
+    const names = appList.map((a) => a.name);
+    void commitReorder(names, from, target, names[from]);
+  }
+
+  function endDrag() {
+    drag = { active: false, from: -1, gap: 0, moved: false, pointerId: -1 };
+    dropLineTop = null;
+    autoScrollSpeed = 0;
+    if (autoScrollTimer !== null) {
+      cancelAnimationFrame(autoScrollTimer);
+      autoScrollTimer = null;
+    }
+  }
+
+  /** Keeps the list scrolling while the pointer is held near a window edge. */
+  function updateAutoScrollSpeed(clientY: number) {
+    const wrap = ledgerWrapEl;
+    if (!wrap) return;
+    const r = wrap.getBoundingClientRect();
+    if (clientY < r.top + AUTO_SCROLL_EDGE_PX) {
+      const depth = (r.top + AUTO_SCROLL_EDGE_PX - clientY) / AUTO_SCROLL_EDGE_PX;
+      autoScrollSpeed = -Math.ceil(depth * AUTO_SCROLL_MAX_PX);
+    } else if (clientY > r.bottom - AUTO_SCROLL_EDGE_PX) {
+      const depth = (clientY - (r.bottom - AUTO_SCROLL_EDGE_PX)) / AUTO_SCROLL_EDGE_PX;
+      autoScrollSpeed = Math.ceil(depth * AUTO_SCROLL_MAX_PX);
+    } else {
+      autoScrollSpeed = 0;
+    }
+  }
+
+  /** Scrolls a held drag, and re-resolves the drop target after the scroll. */
+  function autoScrollStep() {
+    if (!drag.active) return;
+    const wrap = ledgerWrapEl;
+    if (wrap && autoScrollSpeed !== 0) {
+      wrap.scrollTop += autoScrollSpeed;
+      const gap = gapAt(lastPointerY);
+      if (gap !== drag.gap) drag = { ...drag, gap };
+      showDropLine(gap);
+    }
+    autoScrollTimer = requestAnimationFrame(autoScrollStep);
+  }
+
+  /** Arrow keys move the focused row, so reorder works without a pointer. */
+  function onGripKeydown(e: KeyboardEvent, index: number, name: string) {
+    const names = appList.map((a) => a.name);
+    let to = index;
+    if (e.key === "ArrowUp") to = index - 1;
+    else if (e.key === "ArrowDown") to = index + 1;
+    else if (e.key === "Home") to = 0;
+    else if (e.key === "End") to = names.length - 1;
+    else return;
+    if (to < 0 || to >= names.length || to === index) return;
+    e.preventDefault();
+    void commitReorder(names, index, to, name);
+  }
+
+  /** Writes the new order to config.toml, then restores focus to the grip. */
+  async function commitReorder(
+    names: string[],
+    from: number,
+    to: number,
+    focusName?: string,
+  ) {
+    const next = moveItem(names, from, to);
+    if (next.every((n, i) => n === names[i])) return;
+    isReordering = true;
+    errorMessage = "";
+    try {
+      await reorderAppConfigs(next);
+      await refreshFromConfig();
+      if (focusName) {
+        await tick();
+        const grip = ledgerTableEl?.querySelector<HTMLElement>(
+          `[data-grip="${CSS.escape(focusName)}"]`,
+        );
+        grip?.focus();
+        announceReorder(focusName, next.indexOf(focusName) + 1, next.length);
+      }
+    } catch (e) {
+      errorMessage = `Could not reorder: ${e}`;
+    } finally {
+      isReordering = false;
+    }
+  }
+
+  function announceReorder(name: string, position: number, total: number) {
+    reorderAnnouncement = `Moved ${name} to position ${position} of ${total}.`;
+  }
+
   // ── Cursor tooltip ───────────────────────────────────────────────────────
 
   /** Shows a row's config errors at the pointer, if it has any. */
@@ -593,7 +778,7 @@
     closeRowMenu();
     try {
       const configs = await getFullConfig();
-      const cfg = configs[appName];
+      const cfg = configs.find((c) => c.name === appName);
       if (!cfg || cfg.errors?.length) return;
       await updateAppConfig(appName, { ...cfg, enabled: target });
       await refreshFromConfig();
@@ -608,7 +793,7 @@
     restarting = { ...restarting, [appName]: true };
     try {
       const configs = await getFullConfig();
-      const cfg = configs[appName];
+      const cfg = configs.find((c) => c.name === appName);
       if (!cfg || cfg.errors?.length) return;
       // Pause, let the core's debounce stop it, then resume.
       await updateAppConfig(appName, { ...cfg, enabled: false });
@@ -712,7 +897,8 @@
     try {
       if (isCreateMode) {
         const configs = await getFullConfig();
-        if (configs[name] && !configs[name].errors?.length) {
+        const clash = configs.find((c) => c.name === name && !c.errors?.length);
+        if (clash) {
           await failValidation(`"${name}" already exists. Choose another name.`);
           return;
         }
@@ -742,7 +928,11 @@
   }
 </script>
 
-<svelte:window />
+<svelte:window
+  onpointermove={onPointerMove}
+  onpointerup={onPointerUp}
+  onpointercancel={endDrag}
+/>
 
 <main class="window">
   <Titlebar {maximized} tally={tallyForDisplay} onAdd={openCreate} themeSetting={themeSetting} {prefersDark} onSelectTheme={selectTheme} />
@@ -796,10 +986,11 @@
         <button class="ghost" type="button" onclick={openCreate}>Add your first app</button>
       </div>
     {:else if appList.length > 0}
-      <div class="ledger-wrap">
-        <table class="ledger">
+      <div class="ledger-wrap" bind:this={ledgerWrapEl} aria-busy={isReordering}>
+        <table class="ledger" bind:this={ledgerTableEl}>
           <thead>
             <tr>
+              <th class="c-grip"><span class="sr-only">Reorder</span></th>
               <th class="c-app">App</th>
               <th class="c-state">State</th>
               <th class="c-pid num">PID</th>
@@ -807,16 +998,38 @@
             </tr>
           </thead>
           <tbody>
-            {#each appList as app (app.name)}
+            {#each appList as app, i (app.name)}
               {@const view = displayState(app)}
               <tr
                 ondblclick={() => openEditor(app.name)}
                 oncontextmenu={(e) => openRowMenu(e, app)}
                 class:disabled={!app.enabled}
+                class:dragging={drag.active && drag.from === i && drag.moved}
                 onmouseenter={(e) => showHoverTip(e, app)}
                 onmousemove={moveHoverTip}
                 onmouseleave={hideHoverTip}
               >
+                <td class="c-grip">
+                  <button
+                    class="grip"
+                    type="button"
+                    data-grip={app.name}
+                    aria-label="Reorder {app.name}. Use arrow keys to move it."
+                    title="Drag to reorder"
+                    onpointerdown={(e) => onGripPointerDown(e, i)}
+                    onkeydown={(e) => onGripKeydown(e, i, app.name)}
+                    ondblclick={(e) => e.stopPropagation()}
+                  >
+                    <svg viewBox="0 0 8 12" width="8" height="12" aria-hidden="true">
+                      <circle cx="1.5" cy="2" r="1" />
+                      <circle cx="6.5" cy="2" r="1" />
+                      <circle cx="1.5" cy="6" r="1" />
+                      <circle cx="6.5" cy="6" r="1" />
+                      <circle cx="1.5" cy="10" r="1" />
+                      <circle cx="6.5" cy="10" r="1" />
+                    </svg>
+                  </button>
+                </td>
                 <td class="c-app">
                   <div class="app-cell">
                     <span class="charge charge-{view.tone}" aria-hidden="true"></span>
@@ -843,13 +1056,17 @@
             {/each}
           </tbody>
         </table>
+        {#if dropLineTop !== null}
+          <div class="drop-line" style="top: {dropLineTop}px" aria-hidden="true"></div>
+        {/if}
       </div>
+      <p class="sr-only" role="status" aria-live="polite">{reorderAnnouncement}</p>
     {/if}
   </div>
 
   <footer class="foot">
     {#if coreConnected}
-      <span>Double-click a row to edit · right-click for actions</span>
+      <span>Drag the grip to reorder · double-click to edit · right-click for actions</span>
     {:else}
       <!-- Detached: rows come from config.toml alone, so the state column reads
            Unknown rather than a guess. The notice names the fix, and offers no
@@ -1428,11 +1645,14 @@
     border: 1.5px solid var(--stone);
   }
 
-  /* ── Ledger ─────────────────────────────────────────────────────────────── */
+  /* ── Ledger ─────────────────────────────────────────────────────────── */
   .ledger-wrap {
     flex: 1;
     min-height: 0;
     overflow: auto;
+    /* Anchors the drag insertion line, which is positioned in scroll-content
+       space so it tracks the rows as the list scrolls. */
+    position: relative;
     /* The ledger is a parchment card on the white canvas (reference surface
        level 1): the warm print surface, lifted by tonal contrast, no shadow. */
     background: var(--parchment);
@@ -1483,6 +1703,71 @@
   }
   .ledger tbody tr.disabled .app-name {
     color: var(--graphite);
+  }
+  /* The dragged row recedes so the insertion line is the thing to watch. */
+  .ledger tbody tr.dragging {
+    background: var(--surface-hover);
+  }
+  .ledger tbody tr.dragging td {
+    opacity: 0.5;
+  }
+
+  /* ── Reorder grip + drop line ───────────────────────────────────────────── */
+  .c-grip {
+    width: 1%;
+    padding-right: 0;
+  }
+  /* Sticky, so the line stays at the row's on-screen position (top offset is
+     in scroll-content space, matching the rows). Under the sticky header
+     (z-index 1), so a boundary scrolled beneath the header is hidden, not
+     drawn over the column labels. */
+  .drop-line {
+    position: absolute;
+    left: var(--s-20);
+    right: var(--s-20);
+    height: 2px;
+    background: var(--ink);
+    border-radius: var(--r-pill);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .grip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    /* Graphite, not stone: the dots are a control boundary, so they clear 3:1
+       against the parchment card in both themes. */
+    color: var(--graphite);
+    border-radius: var(--r-input);
+    cursor: grab;
+    touch-action: none;
+  }
+  .grip:hover {
+    color: var(--ink);
+  }
+  .grip:active {
+    cursor: grabbing;
+  }
+  .grip svg {
+    fill: currentColor;
+  }
+  /* Hidden to the eye, present to assistive tech. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    border: 0;
+    white-space: nowrap;
   }
 
   .c-app {

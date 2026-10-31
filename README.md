@@ -59,6 +59,8 @@ Comments and formatting survive edits made through the UI. It rewrites only the 
 
 The file takes arguments as a string array (`args = ["-a", "-b"]`). The management UI accepts them as a single shell-like string (e.g. `-a -b "quoted string"`) and parses them for you.
 
+The order of the tables is the order the UI lists them. Reorder entries by dragging a row's grip in the UI, or by moving the `[name]` tables in the file; both write the same order, and comments travel with their entry.
+
 ### Example
 
 ```toml
@@ -114,7 +116,7 @@ Each top-level TOML table (`[name]`) defines one monitored app. `name` is the id
 
 ### Management UI
 
-- **Rows** are one entry each: a state marker, name, command, state word, PID, and restart count. Double-click to edit; right-click to restart, pause, or resume.
+- **Rows** are one entry each: a drag grip, a state marker, name, command, state word, PID, and restart count. Double-click to edit; right-click to restart, pause, or resume. Hold the grip and drag to move an entry up or down: the file's table order is the list order, so a drop rewrites `config.toml`. Arrow keys move a focused grip for keyboard use.
 - **View log** (right-click a row) opens a read-only panel of that app's captured output, with a timestamped divider per launch.
 - **Add app** (the lime button) opens the editor. You can also drop an executable or script onto the window to start a new entry with its command filled in.
 - **Theme**: the topbar toggle cycles **Auto, Light, Dark**. *Auto* follows your Windows setting and updates when it changes. The choice is remembered between launches.

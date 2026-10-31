@@ -10,16 +10,20 @@
  *
  *   * `main` — stable releases. The version bump is committed back so the tag,
  *     the binaries, and the checked-in version all agree.
- *   * `N.x-dev` (e.g. `1.x-dev`) — pre-releases (`1.1.0-beta.1`, `beta.2`, …).
+ *   * `N.x-dev` (e.g. `1.x-dev`) — pre-releases (`1.1.0-next.1`, `next.2`, …).
  *     The bump is *not* committed: Cargo.toml is written in the CI working tree
  *     only, so a dev branch never diverges from `main` on the version line and
  *     merges never conflict there.
  *
  * Only the dev branch currently being run is declared, so every dev branch can
- * use the same `beta` prerelease id: semantic-release requires prerelease ids to
+ * use the same `next` prerelease id: semantic-release requires prerelease ids to
  * be unique across the declared branches, and declaring a glob would expand to
  * every `N.x-dev` at once. Tag lookup is already scoped per branch
  * (`git tag --merged`), so the lines never see each other's tags.
+ *
+ * The prerelease id is `next` rather than `beta`: a dev-branch pre-release sits
+ * *before* alpha/beta in the release ladder, so `next` names it honestly (as in
+ * npm's `next` dist-tag) without implying a maturity stage it has not reached.
  *
  * The version lives in exactly one place — `[workspace.package]` in the root
  * Cargo.toml — which both Cargo and Tauri read. Nothing else in the tree
@@ -40,10 +44,10 @@ const branch = currentBranch();
 const isDevBranch = /^\d+\.x-dev$/.test(branch);
 const isMain = branch === 'main';
 
-// Declaring only the running dev branch keeps `beta` unique (see the header).
+// Declaring only the running dev branch keeps `next` unique (see the header).
 const branches = ['main'];
 if (isDevBranch) {
-  branches.push({ name: branch, prerelease: 'beta' });
+  branches.push({ name: branch, prerelease: 'next' });
 }
 
 const plugins = [
@@ -100,7 +104,7 @@ const plugins = [
     },
   ],
   // Major releases only make sense on `main`. A `BREAKING CHANGE` commit on a
-  // dev branch would otherwise cut `2.0.0-beta.1`; the workflow_dispatch guard
+  // dev branch would otherwise cut `2.0.0-next.1`; the workflow_dispatch guard
   // only covers a manual `major`, so gate it here to cover both paths. Runs
   // after the exec guard above so its clearer "version already exists" message
   // comes first when both apply.

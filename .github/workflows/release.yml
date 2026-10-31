@@ -5,7 +5,7 @@ name: Release
 # both binaries, and publishes the GitHub release with its assets.
 #
 # `main` cuts stable releases and commits the bump back (tagged `[skip ci]`, so
-# this workflow does not re-fire). `N.x-dev` branches cut `beta` pre-releases
+# this workflow does not re-fire). `N.x-dev` branches cut `next` pre-releases
 # and do *not* commit the bump — the version is transient there, so dev branches
 # never conflict with `main` on the Cargo.toml version line. See
 # `release.config.cjs` for the per-branch behaviour.
@@ -19,7 +19,7 @@ name: Release
 
 on:
   push:
-    # `main` for stable releases; any `N.x-dev` for beta pre-releases.
+    # `main` for stable releases; any `N.x-dev` for next pre-releases.
     branches: [main, '+([0-9]).x-dev']
   workflow_dispatch:
     inputs:
@@ -136,7 +136,7 @@ jobs:
     # every early release would show a failing job for a package WinGet does not
     # have yet.
     #
-    # Stable releases only: a `N.x-dev` run cuts a `beta` pre-release, which must
+    # Stable releases only: a `N.x-dev` run cuts a `next` pre-release, which must
     # never reach the WinGet package users install from.
     if: >-
       needs.release.outputs.released == 'true' &&

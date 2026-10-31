@@ -2,16 +2,20 @@
  * Generates the WinGet manifest set for a release.
  *
  * WinGet needs three YAML files (version, installer, defaultLocale) submitted to
- * `microsoft/winget-pkgs`. This script produces them from the installer that a
- * release actually published — the SHA256 must come from that exact artifact,
+ * `microsoft/winget-pkgs`. This script produces them from the installers that a
+ * release actually published: the SHA256 must come from those exact artifacts,
  * because a Tauri build is not bit-reproducible, so hashing a local build would
  * not match what users download.
  *
  *   node scripts/release/winget-manifest.mjs \
- *     --installer <path-to-the-downloaded-setup.exe> [--version 1.0.0] [--out winget]
+ *     --x64 <path-to-kandel-<v>-windows-x64-setup.exe> \
+ *     [--arm64 <path-to-kandel-<v>-windows-arm64-setup.exe>] \
+ *     [--version 1.0.0] [--out winget]
  *
- * The version defaults to `[workspace.package]` in Cargo.toml. The installer URL
- * is derived from the tag and asset name `scripts/package.mjs` produces.
+ * Pass whichever architectures the release shipped; each becomes an entry under
+ * `Installers:`. The version defaults to `[workspace.package]` in Cargo.toml.
+ * The installer URLs are derived from the tag and the asset names
+ * `scripts/package.mjs` produces.
  */
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -55,21 +59,38 @@ function currentVersion() {
 
 const args = parseArgs(process.argv.slice(2));
 const version = args.version ?? currentVersion();
-const installer = args.installer;
 const outDir = args.out ?? 'winget';
 
-if (!installer) {
-  console.error('usage: node scripts/release/winget-manifest.mjs --installer <setup.exe> [--version X] [--out dir]');
+// WinGet's architecture token (`x64`, `arm64`) is also the one `package.mjs`
+// puts in the installer file name, so it labels both the asset and the entry.
+const installers = [
+  { arch: 'x64', file: args.x64 },
+  { arch: 'arm64', file: args.arm64 },
+].filter((entry) => entry.file);
+
+if (installers.length === 0) {
+  console.error(
+    'usage: node scripts/release/winget-manifest.mjs [--x64 <setup.exe>] [--arm64 <setup.exe>] [--version X] [--out dir]',
+  );
   process.exit(1);
 }
 
-const assetName = `kandel-${version}-windows-x64-setup.exe`;
-const url = `${REPO}/releases/download/v${version}/${assetName}`;
-
-const sha256 = createHash('sha256')
-  .update(readFileSync(installer))
-  .digest('hex')
-  .toUpperCase();
+/** The `Installers:` list: one block per architecture, hashed from its file. */
+function installerEntries() {
+  return installers
+    .map(({ arch, file }) => {
+      const assetName = `kandel-${version}-windows-${arch}-setup.exe`;
+      const url = `${REPO}/releases/download/v${version}/${assetName}`;
+      const sha256 = createHash('sha256')
+        .update(readFileSync(file))
+        .digest('hex')
+        .toUpperCase();
+      console.log(`[winget] ${arch}: ${assetName}`);
+      console.log(`[winget] ${arch} sha256 ${sha256}`);
+      return `- Architecture: ${arch}\n  InstallerUrl: ${url}\n  InstallerSha256: ${sha256}`;
+    })
+    .join('\n');
+}
 
 const header = (type) =>
   `# yaml-language-server: $schema=https://aka.ms/winget-manifest.${type}.1.12.0.schema.json`;
@@ -99,9 +120,7 @@ InstallerSwitches:
 UpgradeBehavior: install
 ReleaseDate: ${new Date().toISOString().slice(0, 10)}
 Installers:
-- Architecture: x64
-  InstallerUrl: ${url}
-  InstallerSha256: ${sha256}
+${installerEntries()}
 ManifestType: installer
 ManifestVersion: 1.12.0
 `,
@@ -143,6 +162,4 @@ for (const [name, content] of Object.entries(files)) {
   console.log(`[winget] wrote ${path.relative(root, file)}`);
 }
 
-console.log(`[winget] installer ${assetName}`);
-console.log(`[winget] sha256 ${sha256}`);
 console.log(`[winget] submit the folder: ${path.relative(root, dir)}`);

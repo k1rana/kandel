@@ -31,6 +31,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          # arm64 is cross-compiled from this x64 runner; install its target so
+          # an arm64-only break (e.g. a new Windows API feature) fails here
+          # rather than at release time.
+          targets: aarch64-pc-windows-msvc
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -63,6 +67,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # The shipped binary is arm64 as well as x64, so prove the supervised core
+      # (the arch-relevant code) still builds there rather than discovering it on
+      # release day. The UI is skipped only to keep this job quick; the release
+      # job builds it for arm64 in full.
+      - name: Check the arm64 target
+        run: cargo check -p kandel-core -p kandel-config -p kandel-testkit --target aarch64-pc-windows-msvc
 
   frontend:
     name: Frontend tests and checks

@@ -32,7 +32,7 @@ On Linux, `systemd` supervises processes out of the box. On Windows the equivale
 
 ## Installation
 
-Grab the latest `kandel-<version>-windows-amd64.zip` from the Releases page, extract it anywhere (e.g. `%LOCALAPPDATA%\Programs\Kandel\`), and run `kandel.exe`. To build it yourself, see [Building from source](#building-from-source).
+Grab `kandel-<version>-windows-<arch>.zip` for your architecture (`x64` or `arm64`) from the Releases page, extract it anywhere (e.g. `%LOCALAPPDATA%\Programs\Kandel\`), and run `kandel.exe`. Both architectures are published for every release, so pick the one that matches your Windows install. To build it yourself, see [Building from source](#building-from-source).
 
 Kandel is two binaries, and both have to sit in the same folder:
 
@@ -281,7 +281,9 @@ This produces:
 - `build/kandel.exe` for the background supervisor
 - `build/kandel-ui.exe` for the management UI
 
-`pnpm run release` builds both and packages them into `build/kandel-<version>-windows-amd64.zip`.
+`pnpm run release` builds both binaries and packages them for the host architecture into `build/kandel-<version>-windows-<arch>.zip`.
+
+The binaries are architecture-specific. `pnpm run build` builds for the host, and `pnpm run build:arm64` cross-builds arm64, which needs `rustup target add aarch64-pc-windows-msvc`. Releases ship both `windows-x64` and `windows-arm64`. Passing the matching `--target` to `scripts/package.mjs` names the archive and installer for each.
 
 For the dev setup and the test commands, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 

@@ -9,6 +9,9 @@
  *
  * Runs from `beforeBuildCommand`, so `tauri build` alone produces a complete
  * installer.
+ *
+ * The core is built at the target Tauri passes via `TAURI_ENV_TARGET_TRIPLE`, so
+ * a `--target` build stages that target's core and a plain build stages the host's.
  */
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -40,11 +43,15 @@ function hostTriple() {
   return match[1];
 }
 
-const triple = hostTriple();
-const ext = process.platform === "win32" ? ".exe" : "";
+// `tauri build --target <triple>` sets this for its `beforeBuildCommand`, so a
+// cross build stages an arm64 sidecar beside the arm64 app. Absent for a plain
+// `tauri build`, which targets the host.
+const target = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
+const targetArg = process.env.TAURI_ENV_TARGET_TRIPLE ? ["--target", target] : [];
+const ext = target.includes("windows") ? ".exe" : "";
 
-console.log("[sidecar] building the core…");
-const build = spawnDirect("cargo", ["build", "--release", "-p", "kandel-core"], {
+console.log(`[sidecar] building the core for ${target}…`);
+const build = spawnDirect("cargo", ["build", "--release", "-p", "kandel-core", ...targetArg], {
   stdio: "inherit",
 });
 if (build.status !== 0) {
@@ -52,7 +59,10 @@ if (build.status !== 0) {
   process.exit(build.status ?? 1);
 }
 
-const source = path.join(root, "target", "release", `kandel${ext}`);
+// A cross build writes under `target/<triple>/release`; a host build under
+// `target/release`.
+const releaseDir = path.join(root, "target", targetArg.length ? target : "", "release");
+const source = path.join(releaseDir, `kandel${ext}`);
 if (!existsSync(source)) {
   console.error(`[sidecar] expected the core at ${source}`);
   process.exit(1);
@@ -63,6 +73,6 @@ if (!existsSync(source)) {
 const dir = path.join(root, "crates", "kandel-ui", "binaries");
 mkdirSync(dir, { recursive: true });
 
-const dest = path.join(dir, `kandel-${triple}${ext}`);
+const dest = path.join(dir, `kandel-${target}${ext}`);
 copyFileSync(source, dest);
 console.log(`[sidecar] staged ${path.relative(root, dest)} from the release build`);

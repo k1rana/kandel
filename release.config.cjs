@@ -122,12 +122,20 @@ const plugins = [
     {
       assets: [
         {
-          path: 'build/kandel-*-windows-amd64.zip',
-          label: 'Portable (windows-amd64)',
+          path: 'build/kandel-*-windows-x64.zip',
+          label: 'Portable (windows-x64)',
+        },
+        {
+          path: 'build/kandel-*-windows-arm64.zip',
+          label: 'Portable (windows-arm64)',
         },
         {
           path: 'build/kandel-*-windows-x64-setup.exe',
           label: 'NSIS installer (x64)',
+        },
+        {
+          path: 'build/kandel-*-windows-arm64-setup.exe',
+          label: 'NSIS installer (arm64)',
         },
       ],
     },

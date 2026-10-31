@@ -170,8 +170,10 @@ fn show(hwnd: *mut std::ffi::c_void, severity: Severity, title: &str, body: &str
         ..Default::default()
     };
 
-    write_wide(&mut data.szInfoTitle, title);
-    write_wide(&mut data.szInfo, body);
+    // x86's `NOTIFYICONDATAW` is `packed(1)`: `&mut data.szInfoTitle` would be a
+    // misaligned reference, so assign an aligned local array by value instead.
+    data.szInfoTitle = wide_field(title);
+    data.szInfo = wide_field(body);
 
     let ok = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
     if !ok.as_bool() {
@@ -181,6 +183,14 @@ fn show(hwnd: *mut std::ffi::c_void, severity: Severity, title: &str, body: &str
             "the shell refused the notification balloon"
         );
     }
+}
+
+/// A [`write_wide`] result as a by-value array, so a packed struct field can be
+/// assigned without forming a reference to it.
+fn wide_field<const N: usize>(s: &str) -> [u16; N] {
+    let mut buf = [0u16; N];
+    write_wide(&mut buf, s);
+    buf
 }
 
 /// Copies `s` into a fixed-size NUL-terminated UTF-16 buffer, truncating on a

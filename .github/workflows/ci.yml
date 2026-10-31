@@ -5,6 +5,14 @@ on:
     branches: ["**"]
   pull_request:
 
+# Supersede in-flight runs for the same ref: once a newer push lands, the older
+# run's result is moot, so cancel it instead of burning a runner to completion.
+# Scoping the group to `github.ref` keeps branches and PRs from cancelling each
+# other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -13,6 +21,9 @@ jobs:
   rust:
     name: Rust tests and lints
     runs-on: windows-latest
+    # A cold windows run (no cargo cache) is the slow case; this is a generous
+    # ceiling that only trips on a genuine hang.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -37,10 +48,12 @@ jobs:
 
       - name: Build the frontend
         # The UI binary embeds `frontend/dist` at compile time, so the frontend
-        # has to be built before any Rust target that includes it.
+        # has to be built before any Rust target that includes it. Only `vite
+        # build` is needed here — the `build` script also runs `svelte-check`,
+        # which the `frontend` job already covers.
         run: |
           pnpm install --frozen-lockfile
-          pnpm --dir crates/kandel-ui/frontend build
+          pnpm --dir crates/kandel-ui/frontend exec vite build
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -54,6 +67,7 @@ jobs:
   frontend:
     name: Frontend tests and checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

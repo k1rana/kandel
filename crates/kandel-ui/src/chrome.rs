@@ -10,7 +10,7 @@
 //! unsupported and return an error, which is harmless and ignored.
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
 
 /// The smallest usable window, matching `tauri.conf.json`'s `minInnerSize`.
 const MIN_W: u32 = 520;
@@ -57,6 +57,50 @@ pub fn clamp_size(size: (u32, u32), screen: (u32, u32)) -> (u32, u32) {
     let max_w = screen.0.max(MIN_W);
     let max_h = screen.1.max(MIN_H);
     (size.0.clamp(MIN_W, max_w), size.1.clamp(MIN_H, max_h))
+}
+
+/// Reads the `main` window size from a `window-state` state file.
+///
+/// `None` when the size is missing or unusable, or when the window was left
+/// maximized: the plugin saves no restored size in that case.
+pub fn parse_saved_size(raw: &[u8]) -> Option<(u32, u32)> {
+    let state: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    let main = state.get("main")?;
+    if main
+        .get("maximized")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let width = u32::try_from(main.get("width")?.as_u64()?).ok()?;
+    let height = u32::try_from(main.get("height")?.as_u64()?).ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Re-applies the size the window-state plugin restored.
+///
+/// `tao` sizes an undecorated window against a decorated frame, so restore lands
+/// ~30px too tall and the plugin saves that height, growing the window on every
+/// launch. Reads the plugin's file, not its cache, which already holds the
+/// inflated value.
+pub fn reapply_restored_size(window: &WebviewWindow, app: &tauri::AppHandle) {
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
+    let Ok(dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let Ok(raw) = std::fs::read(dir.join(tauri_plugin_window_state::DEFAULT_FILENAME)) else {
+        return;
+    };
+    let Some((width, height)) = parse_saved_size(&raw) else {
+        return;
+    };
+    if window.inner_size().ok() == Some(tauri::PhysicalSize::new(width, height)) {
+        return;
+    }
+    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
 }
 
 /// Keeps a restored window usable.
@@ -172,5 +216,32 @@ mod tests {
     fn never_exceeds_a_tiny_screen() {
         // A screen smaller than the minimum still yields a usable window.
         assert_eq!(clamp_size((2000, 2000), (400, 300)), (MIN_W, MIN_H));
+    }
+
+    #[test]
+    fn reads_the_saved_size() {
+        let raw = br#"{"main":{"width":800,"height":500,"x":10,"y":20,"maximized":false}}"#;
+        assert_eq!(parse_saved_size(raw), Some((800, 500)));
+    }
+
+    #[test]
+    fn ignores_a_maximized_window() {
+        // The plugin does not keep a meaningful restored size while maximized.
+        let raw = br#"{"main":{"width":800,"height":500,"maximized":true}}"#;
+        assert_eq!(parse_saved_size(raw), None);
+    }
+
+    #[test]
+    fn ignores_missing_empty_or_malformed_state() {
+        assert_eq!(parse_saved_size(b""), None);
+        assert_eq!(parse_saved_size(b"not json"), None);
+        assert_eq!(
+            parse_saved_size(br#"{"other":{"width":1,"height":1}}"#),
+            None
+        );
+        assert_eq!(
+            parse_saved_size(br#"{"main":{"width":0,"height":0}}"#),
+            None
+        );
     }
 }

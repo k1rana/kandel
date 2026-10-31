@@ -70,11 +70,15 @@ pub fn run(config_path: PathBuf) {
             // geometry and shows the window later, in `on_window_ready`.
             if let Some(window) = app.get_webview_window("main") {
                 chrome::apply_window_chrome(&window);
+
+                // Restore is off for an undecorated window: tao sizes it with a
+                // decorated frame, so the window grows ~30px taller on every
+                // launch. Re-apply the saved size once the window has settled.
+                chrome::reapply_restored_size(&window, app.handle());
+
                 chrome::sanitize_window_geometry(&window);
 
-                // The window-state plugin restores geometry in its own
-                // `on_window_ready`, which runs after this setup hook. Re-run
-                // the guard on resize so a corrupt or off-monitor restore is
+                // Re-clamp on resize so a corrupt or off-monitor restore is
                 // corrected. The clamp is a fixpoint, so this cannot loop.
                 let guarded = window.clone();
                 window.on_window_event(move |event| {

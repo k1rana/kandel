@@ -32,6 +32,10 @@ pub fn run(config_path: PathBuf) {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // In-app updates: checks the release manifest, downloads the signed NSIS
+        // installer, and runs it. The installer restarts the core (see
+        // `windows/installer.nsi`), so an update relaunches the supervisor.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Persist and restore the window size/position/maximized state between
         // launches. `VISIBLE` lets the plugin show the (initially hidden)
         // window only after the restored geometry is applied, so there is no

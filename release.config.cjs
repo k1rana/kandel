@@ -137,6 +137,12 @@ const plugins = [
           path: 'build/kandel-*-windows-arm64-setup.exe',
           label: 'NSIS installer (arm64)',
         },
+        {
+          // The static updater manifest the app fetches from the release's
+          // `latest` alias. It carries both architectures' signatures and URLs.
+          path: 'build/latest.json',
+          label: 'Updater manifest',
+        },
       ],
     },
   ],

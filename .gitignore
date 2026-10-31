@@ -24,6 +24,12 @@ doc/
 config.toml
 *config.toml
 
+# Local environment: holds the Tauri release signing key during a local build.
+# The key must never be committed; CI reads it from repository secrets.
+.env
+.env.*
+!.env.example
+
 # Frontend
 crates/kandel-ui/frontend/dist/
 crates/kandel-ui/frontend/node_modules/

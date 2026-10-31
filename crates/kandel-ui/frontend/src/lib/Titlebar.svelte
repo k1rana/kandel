@@ -4,6 +4,7 @@
   import type { ThemeSetting } from "./theme";
   import About from "./About.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
+  import { updateState } from "./update.svelte";
 
   // The application mark, generated from the same geometry as the app icon.
   import markUrl from "../assets/brand-mark.svg";
@@ -15,7 +16,6 @@
     themeSetting,
     onSelectTheme,
     prefersDark = false,
-    updateAvailable = false,
   }: {
     maximized?: boolean;
     tally: Tally;
@@ -24,17 +24,13 @@
     onSelectTheme: (next: ThemeSetting) => void;
     /** The OS preference, forwarded to the Settings menu's `Auto` label. */
     prefersDark?: boolean;
-    /**
-     * Whether a newer release is known to exist.
-     *
-     * Drives the dot above the wordmark. The update flow lives in About, so the
-     * wordmark carries the notice; until a source for it exists this stays
-     * `false` and no dot is drawn.
-     */
-    updateAvailable?: boolean;
   } = $props();
 
   let aboutOpen = $state(false);
+
+  // Read straight from the shared store rather than a prop, so the wordmark's
+  // dot and the About panel can never disagree about whether an update exists.
+  let updateAvailable = $derived(updateState().status === "available");
 
   // Describes the dot for assistive tech; the wordmark alone would not say why
   // it is marked.
@@ -55,6 +51,7 @@
   <div class="lead" data-tauri-drag-region>
     <button
       class="wordmark"
+      class:has-notice={updateAvailable}
       type="button"
       title="About Kandel"
       aria-haspopup="dialog"
@@ -167,6 +164,11 @@
   }
   .wordmark:hover {
     background: var(--wash);
+  }
+  /* The dot is absolutely placed, so it takes no layout space: without extra
+     padding on the right it would sit on the last letter of the wordmark. */
+  .wordmark.has-notice {
+    padding-right: var(--s-16);
   }
   /* The update notice: a small ink dot riding the wordmark's top-right corner.
      Ink, not lime — lime already means "alive" on the state charge, so a green

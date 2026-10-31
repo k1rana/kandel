@@ -43,6 +43,7 @@
   import ResizeHandles from "./lib/ResizeHandles.svelte";
   import Titlebar from "./lib/Titlebar.svelte";
   import { isWindowMaximized, onWindowResized } from "./lib/window";
+  import { checkForUpdate } from "./lib/update.svelte";
   import {
     applyTheme,
     readSetting,
@@ -270,6 +271,11 @@
       themeSetting = readSetting(localStorage);
       prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
       applyCurrentTheme();
+
+      // Check the release manifest in the background. Offline or rate-limited is
+      // recorded as a failed check rather than an error: the ledger stays the
+      // focus, and About reports what actually happened when opened.
+      void checkForUpdate();
 
       // Seed the ledger from config.toml before any status arrives, so the
       // list is complete whether or not a core is attached.

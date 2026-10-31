@@ -1,6 +1,10 @@
 <script lang="ts">
   import { getAboutInfo, openRepository } from "./api";
   import type { AboutInfo } from "./types";
+  import { checkForUpdate, updateState } from "./update.svelte";
+  import { relativeAge, statusWord, type UpdateStatus } from "./update";
+  import Tooltip from "./Tooltip.svelte";
+  import UpdateModal from "./UpdateModal.svelte";
 
   // The application mark, generated from the same geometry as the app icon by
   // `scripts/make_icons.py`, so the two can never drift apart.
@@ -12,6 +16,26 @@
   let error = $state("");
   let copied = $state(false);
   let copyFailed = $state(false);
+
+  // The release-notes modal, opened from the update button. It takes only the
+  // version; the notes are fetched and cached by the store.
+  let notesOpen = $state(false);
+  let notesVersion = $state("");
+
+  let status = $derived(updateState());
+  let checking = $derived(status.status === "checking");
+
+  // Announced to screen readers when a check finishes, since the visible text
+  // only covers the actionable states. Empty while idle or checking, so the
+  // region does not fire on a state that has no outcome yet.
+  let announcement = $derived(
+    !open || status.status === "idle" || checking ? "" : statusWord(status.status),
+  );
+
+  // Only the update itself needs a check; a failed check is retried by hand.
+  $effect(() => {
+    if (open && status.status === "idle") void checkForUpdate();
+  });
 
   // Fetch lazily: the metadata is only needed once the popover is first opened,
   // and re-fetch is not needed since the version cannot change at runtime.
@@ -66,6 +90,60 @@
   function openRepo() {
     void openRepository();
   }
+
+  /**
+   * Opens the release notes, refreshing first.
+   *
+   * Opening the notes is the moment the user is deciding, so it is also the
+   * moment to re-check: an update published since the startup check should be
+   * offered rather than reported as current. The check is silent, so the button
+   * behind the modal does not blank out mid-flight.
+   */
+  function openNotes() {
+    notesVersion = status.version ?? "";
+    notesOpen = true;
+    // Silent: the button behind the modal keeps its dot instead of blanking, and
+    // the modal leans on the store's cache, so this costs no extra request.
+    void checkForUpdate();
+  }
+
+  // Keep the open modal in step with a fresher check: if a newer version is
+  // found while the notes are open, show it rather than the stale one the modal
+  // was opened with. The notes for it are fetched by the same effect.
+  $effect(() => {
+    if (!notesOpen || status.status !== "available") return;
+    if (status.version && status.version !== notesVersion) notesVersion = status.version;
+  });
+
+  /**
+   * Runs the control's current job: install when a release is on offer,
+   * otherwise check. One button, two verbs, decided by state.
+   */
+  function onControlClick() {
+    if (checking) return;
+    if (status.status === "available") openNotes();
+    else void checkForUpdate(true);
+  }
+
+  /**
+   * Names the control's current job, and the result when there is nothing to
+   * do. The verb leads, so the button never reads as both a check and an
+   * install at once.
+   */
+  function checkTitle(s: { status: UpdateStatus; checkedAt: number; version: string | null }): string {
+    switch (s.status) {
+      case "checking":
+        return "Checking for updates…";
+      case "available":
+        return `Install v${s.version} · release notes`;
+      case "idle":
+        return "Check for updates";
+      case "failed":
+        return `Could not check · retry · last checked ${relativeAge(s.checkedAt, Date.now())}`;
+      case "current":
+        return `Up to date · last checked ${relativeAge(s.checkedAt, Date.now())}`;
+    }
+  }
 </script>
 
 {#if open}
@@ -80,9 +158,9 @@
         <span class="ver tnum">v{info?.version ?? "…"}</span>
       </div>
 
-      <!-- Source link: the GitHub mark, drawn as a button so it reads as a
-           control. Kept achromatic, not lime: lime is the primary action and
-           the health signal in this world, so it is not spent on a link. -->
+      <!-- Source link, then the update control. The source link stays
+           achromatic; the update control fills with lime only when a release is
+           on offer, because lime marks the one action worth taking. -->
       <button class="ghost-btn" type="button" title="View source on GitHub" aria-label="View source on GitHub" onclick={openRepo}>
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
           <path
@@ -91,6 +169,50 @@
           />
         </svg>
       </button>
+
+      <!-- One control carries the whole update story. It is the refresh action
+           until a release is found, then it becomes the install action: same
+           slot, same tooltip family, icon swapped. A corner dot marks state
+           without moving anything. -->
+      <Tooltip text={checkTitle(status)}>
+        <button
+          class="ghost-btn check"
+          class:is-checking={checking}
+          class:is-failed={status.status === "failed"}
+          class:has-update={status.status === "available"}
+          type="button"
+          aria-label={checkTitle(status)}
+          aria-disabled={checking}
+          onclick={onControlClick}
+        >
+          {#if status.status === "available"}
+            <!-- Download: a filled lime control, because lime is this world's
+                 only filled action and this is now the primary one. -->
+            <svg viewBox="0 0 12 12" width="14" height="14" aria-hidden="true">
+              <path
+                d="M6 1.5v6M3.4 5.2 6 7.8l2.6-2.6M1.8 9.4v1.1h8.4V9.4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          {:else}
+            <svg viewBox="0 0 12 12" width="14" height="14" aria-hidden="true">
+              <path
+                d="M10.2 5.2a4.2 4.2 0 1 0-.6 2.6M10.2 2.2v3h-3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          {/if}
+          <span class="dot" aria-hidden="true"></span>
+        </button>
+      </Tooltip>
     </div>
 
     <p class="blurb">
@@ -128,9 +250,18 @@
           </dd>
         </div>
       </dl>
+
+      <!-- The update state lives entirely in the header control above: its icon,
+           its dot, and its tooltip. Nothing repeats it here. The live region
+           carries the outcome to screen readers, who cannot hover. -->
+      <p class="visually-hidden" aria-live="polite">{announcement}</p>
     {/if}
   </div>
 {/if}
+
+<!-- Release notes, over the About popover, so the popover is not also to be
+     dismissed before the notes can be read. -->
+<UpdateModal open={notesOpen} version={notesVersion} onClose={() => (notesOpen = false)} />
 
 <style>
   .scrim {
@@ -243,6 +374,66 @@
     border-color: var(--ink);
   }
 
+  /* The corner dot marks state without moving the control: ink when a release
+     is available, lime while a check is in flight, red when one failed. */
+  .check {
+    position: relative;
+  }
+  .check .dot {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: transparent;
+  }
+  .check.is-checking .dot {
+    background: var(--lime);
+    box-shadow: 0 0 0 1.5px var(--canvas);
+  }
+  .check.is-failed .dot {
+    background: var(--alert);
+    box-shadow: 0 0 0 1.5px var(--canvas);
+  }
+  /* With a release on offer the control is the filled action, so it needs no
+     separate notice dot: the lime fill is the notice. */
+  .check.has-update {
+    background: var(--lime);
+    border-color: var(--lime);
+    color: var(--lime-ink);
+  }
+  .check.has-update:hover {
+    filter: brightness(0.95);
+    border-color: var(--lime);
+    color: var(--lime-ink);
+  }
+  .check.is-checking svg {
+    animation: spin 0.9s linear infinite;
+  }
+  /* `aria-disabled`, not `disabled`: a genuinely disabled button fires no hover
+     and no focus, so the tooltip that explains the wait could never be read. */
+  .check[aria-disabled="true"] {
+    cursor: default;
+    color: var(--graphite);
+  }
+  .check[aria-disabled="true"]:hover {
+    background: transparent;
+    border-color: var(--ash);
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .check.is-checking svg {
+      animation: none;
+    }
+  }
+
   .blurb {
     margin: 0;
     font-size: var(--text-body-sm);
@@ -300,5 +491,15 @@
     margin: 0;
     font-size: var(--text-body-sm);
     color: var(--alert);
+  }
+
+  /* Screen-reader only, for the live region that announces a check result. */
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>

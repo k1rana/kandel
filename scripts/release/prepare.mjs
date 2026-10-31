@@ -55,3 +55,8 @@ for (const [arch, triple] of Object.entries(TARGETS)) {
   console.log(`[release] packaging ${arch}…`);
   run('node', ['scripts/package.mjs', '--target', triple]);
 }
+
+// One manifest for both architectures, at the version just built. It points at
+// the signed installers; release notes are fetched by the app, not carried here.
+console.log('[release] writing the updater manifest…');
+run('node', ['scripts/release/manifest.mjs']);

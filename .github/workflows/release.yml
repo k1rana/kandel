@@ -131,6 +131,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TYPE: ${{ inputs.release_type }}
+          # Signs the NSIS installers so the in-app updater can verify them.
+          # Secret, never committed; a release without it produces unsigned
+          # artifacts and `scripts/release/manifest.mjs` refuses to run.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx semantic-release
 
   winget:

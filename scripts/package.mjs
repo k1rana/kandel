@@ -205,7 +205,19 @@ const setup = nsisDir
 let installerCopied = false;
 if (setup) {
   copyFileSync(path.join(nsisDir, setup), installer);
-  installerCopied = true;
+  // Tauri writes `<setup>.exe.sig` beside the installer when
+  // `TAURI_SIGNING_PRIVATE_KEY` is set. The updater verifies the artifact
+  // against this signature, so it ships with the installer under the same
+  // lowercase scheme.
+  const sigSrc = path.join(nsisDir, `${setup}.sig`);
+  if (existsSync(sigSrc)) {
+    copyFileSync(sigSrc, `${installer}.sig`);
+    installerCopied = true;
+  } else {
+    console.warn(
+      `[package] no signature next to ${setup} — set TAURI_SIGNING_PRIVATE_KEY to publish updater artifacts`,
+    );
+  }
 } else {
   console.warn(
     `[package] no NSIS installer for ${version} in ${path.relative(root, nsisDir)} — ` +
@@ -224,4 +236,7 @@ if (installerCopied) {
 console.log("[package] contents:");
 for (const entry of readdirSync(stageDir)) {
   console.log(`  ${entry}`);
+}
+if (installerCopied) {
+  console.log(`[package] updater signature: ${path.relative(root, `${installer}.sig`)}`);
 }

@@ -32,6 +32,7 @@ tray-icon = "0.26"
 tauri = "2"
 tauri-build = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
 
 kandel-config = { path = "crates/kandel-config" }
 

@@ -33,6 +33,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "publisher": "Farhan Brillan Widyakirana (k1rana)",
     "homepage": "https://github.com/k1rana/kandel",
@@ -56,6 +57,14 @@
         "headerImage": "windows/header.bmp",
         "sidebarImage": "windows/sidebar.bmp"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZDMTREMzBDNEE5NjE2MDIKUldRQ0ZwWktETk1VL0VtOVNjUHN3SlhTTER0c0ViNy9EQkZxVUdzY3gzclhnSjM5bDhrcE5XUzUK",
+      "endpoints": [
+        "https://github.com/k1rana/kandel/releases/latest/download/latest.json"
+      ]
     }
   }
 }

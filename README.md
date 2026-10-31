@@ -120,6 +120,7 @@ Each top-level TOML table (`[name]`) defines one monitored app. `name` is the id
 - **View log** (right-click a row) opens a read-only panel of that app's captured output, with a timestamped divider per launch.
 - **Add app** (the lime button) opens the editor. You can also drop an executable or script onto the window to start a new entry with its command filled in.
 - **Theme**: the topbar toggle cycles **Auto, Light, Dark**. *Auto* follows your Windows setting and updates when it changes. The choice is remembered between launches.
+- **Updates**: Kandel checks for a newer release when the management UI opens. A small ink dot on the wordmark means one is available; open **About** (click the wordmark) to install it. Installing runs the signed installer and restarts Kandel, so every supervised app stops and starts again. The portable ZIP does not update itself, because it was never installed.
 
 The visual system is documented in [`DESIGN.md`](./DESIGN.md).
 

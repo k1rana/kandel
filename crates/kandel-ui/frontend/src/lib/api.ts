@@ -2,6 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 
 import type { AboutInfo, AppConfig, AppStateInfo, RepairReport } from "./types";
 
@@ -20,6 +21,44 @@ export type ConnectionState = "connected" | "disconnected";
 /** Returns the metadata shown in the About dialog. */
 export function getAboutInfo(): Promise<AboutInfo> {
   return invoke<AboutInfo>("get_about_info");
+}
+
+/**
+ * Returns the raw update handle, or null when this build is current.
+ *
+ * The handle is kept by the caller so installing never re-checks the endpoint.
+ * A failed check rejects: the caller decides whether that is worth surfacing.
+ */
+export async function findUpdate(): Promise<Update | null> {
+  try {
+    return await check();
+  } catch (e) {
+    // Rethrow with the backend's reason intact. The plugin rejects with a
+    // plain string; a bare `throw e` from here often reaches the console as an
+    // empty object, which is useless for diagnosing a failed check.
+    throw new Error(typeof e === "string" ? e : String(e));
+  }
+}
+
+/**
+ * Downloads and installs the update.
+ *
+ * On Windows the installer is launched and the UI process exits; the installer
+ * then restarts the core. The promise therefore rarely resolves on success.
+ */
+export async function installUpdate(
+  update: Update,
+  onProgress: (downloaded: number, total: number | null) => void,
+): Promise<void> {
+  let downloaded = 0;
+  await update.downloadAndInstall((event) => {
+    if (event.event === "Started") {
+      onProgress(0, event.data.contentLength ?? null);
+    } else if (event.event === "Progress") {
+      downloaded += event.data.chunkLength;
+      onProgress(downloaded, null);
+    }
+  });
 }
 
 /** Opens the project repository in the user's default browser. */

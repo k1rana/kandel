@@ -22,7 +22,46 @@ use std::path::PathBuf;
 
 fn main() {
     drop_missing_external_bin();
+    exclude_cdylib_exports();
     tauri_build::build();
+    link_app_manifest_into_tests();
+}
+
+/// `tauri-build` links the Common-Controls v6 manifest into bins, not tests, so
+/// the lib unit harness loads comctl32 v5 and dies on `TaskDialogIndirect`.
+fn link_app_manifest_into_tests() {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if os != "windows" {
+        return;
+    }
+
+    let Ok(out_dir) = std::env::var("OUT_DIR") else {
+        return;
+    };
+    let resource = PathBuf::from(out_dir).join("libresource.a");
+    if !resource.exists() {
+        return;
+    }
+
+    // Unqualified: `-tests` skips the lib's own harness (cargo#10937).
+    println!("cargo:rustc-link-arg={}", resource.display());
+
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if env == "gnu" {
+        // Bins already link this resource; keep the first copy.
+        println!("cargo:rustc-link-arg-bins=-Wl,--allow-multiple-definition");
+    }
+}
+
+/// `ld` auto-exports every global symbol of a MinGW `cdylib` until it overflows
+/// the 16-bit PE ordinal limit and fails the link. Unused on Windows, so excluded.
+fn exclude_cdylib_exports() {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let abi = std::env::var("CARGO_CFG_TARGET_ABI").unwrap_or_default();
+    if os == "windows" && env == "gnu" && abi.is_empty() {
+        println!("cargo:rustc-link-arg-cdylib=-Wl,--exclude-all-symbols");
+    }
 }
 
 /// Neutralizes `bundle.externalBin` for this build when the sidecar is

@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "kandel-config"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "kandel-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "kandel-config",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "kandel-testkit"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "kandel-config",
  "kandel-core",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "kandel-ui"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "kandel-config",

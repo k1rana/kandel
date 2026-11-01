@@ -10,9 +10,14 @@
    * both hover and focus, immediately, and works on a control that only looks
    * disabled (`aria-disabled`).
    *
-   * The bubble is `position: fixed` so it is never clipped by the popover or
-   * modal it is anchored inside, and `pointer-events: none` so it cannot steal
-   * the hover that keeps it open.
+   * The wrapper is `display: contents`, so it adds no box of its own: the
+   * element it wraps keeps the exact place its parent gave it, whether that is
+   * a truncated line of text or a button in a row.
+   *
+   * The bubble is moved into the document body and `position: fixed`, so no
+   * ancestor can clip it or become its containing block. The editor panel is
+   * transformed, and a fixed child of a transformed element is positioned
+   * against that element instead of against the window.
    */
   let {
     text,
@@ -33,6 +38,8 @@
   let pos = $state({ left: 0, top: 0 });
 
   function show() {
+    // An empty message has nothing to say, and the trigger still works.
+    if (!text) return;
     visible = true;
   }
 
@@ -40,14 +47,32 @@
     visible = false;
   }
 
-  // Measure the bubble against the trigger and the window, then place it. Runs
-  // reactively so a text change that resizes the bubble re-clamps it.
+  /** Moves the bubble out of the trigger's ancestors and into the body. */
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        node.remove();
+      },
+    };
+  }
+
+  // The wrapper has no box of its own, so the anchor is the element it wraps.
+  function anchorRect(): DOMRect | null {
+    const child = triggerEl?.firstElementChild;
+    return child ? child.getBoundingClientRect() : null;
+  }
+
+  // Measure the bubble against the trigger and the window, then place it.
   $effect(() => {
-    if (!visible || !triggerEl || !tipEl) {
+    // Reading the text ties the measurement to it: a message whose wording
+    // changes size is clamped to the window again.
+    if (!visible || !triggerEl || !tipEl || !text) {
       placed = false;
       return;
     }
-    const anchor = triggerEl.getBoundingClientRect();
+    const anchor = anchorRect();
+    if (!anchor) return;
     const tip = tipEl.getBoundingClientRect();
     const pad = 8;
 
@@ -73,15 +98,37 @@
     window.addEventListener("keydown", onKeydown);
     return () => window.removeEventListener("keydown", onKeydown);
   });
+
+  // The pointer events are the bubbling ones: the wrapper has no box, so
+  // `mouseenter` would have no area to enter.
+  function onPointerOver(e: MouseEvent) {
+    const from = e.relatedTarget as Node | null;
+    // Moving between the trigger's own children is not a new hover.
+    if (from && triggerEl?.contains(from)) return;
+    show();
+  }
+
+  function onPointerOut(e: MouseEvent) {
+    const to = e.relatedTarget as Node | null;
+    if (to && triggerEl?.contains(to)) return;
+    hide();
+  }
+
+  function onFocusOut(e: FocusEvent) {
+    const to = e.relatedTarget as Node | null;
+    if (to && triggerEl?.contains(to)) return;
+    hide();
+  }
 </script>
 
 <span
   class="tip-trigger"
+  data-tip-trigger
   bind:this={triggerEl}
-  onmouseenter={show}
-  onmouseleave={hide}
+  onmouseover={onPointerOver}
+  onmouseout={onPointerOut}
   onfocusin={show}
-  onfocusout={hide}
+  onfocusout={onFocusOut}
   role="presentation"
 >
   {@render children()}
@@ -93,6 +140,7 @@
     class:placed
     role="tooltip"
     bind:this={tipEl}
+    use:portal
     style="left: {pos.left}px; top: {pos.top}px;"
   >
     {text}
@@ -100,11 +148,10 @@
 {/if}
 
 <style>
-  /* A flex item sized to its trigger, so wrapping a button does not change the
-     row's layout. */
+  /* No box of its own: the element it wraps keeps the box the parent gave it,
+     so wrapping never changes a row, a cell, or a line of text. */
   .tip-trigger {
-    display: inline-flex;
-    flex: none;
+    display: contents;
   }
 
   /* Matches the pointer tooltip in App.svelte: canvas ground, ink hairline,
@@ -120,6 +167,10 @@
     color: var(--ink);
     font-size: var(--text-caption);
     line-height: 1.4;
+    /* A list of problems reads as a list, one problem per line. */
+    white-space: pre-line;
+    /* A path or a command line breaks where it has to, never off the window. */
+    overflow-wrap: anywhere;
     pointer-events: none;
     opacity: 0;
   }

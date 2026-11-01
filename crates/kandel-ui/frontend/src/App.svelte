@@ -42,6 +42,7 @@
   import { makeEmptyForm, type AppConfig, type AppStateInfo, type ConfigIssue, type EnvVar, type LogEvent } from "./lib/types";
   import ResizeHandles from "./lib/ResizeHandles.svelte";
   import Titlebar from "./lib/Titlebar.svelte";
+  import Tooltip from "./lib/Tooltip.svelte";
   import { isWindowMaximized, onWindowResized } from "./lib/window";
   import { checkForUpdate } from "./lib/update.svelte";
   import {
@@ -751,15 +752,36 @@
 
   // ── Cursor tooltip ───────────────────────────────────────────────────────
 
+  /**
+   * Whether the pointer is over an element that carries its own tooltip.
+   *
+   * The tooltip component marks its trigger, so this is how the row's error
+   * tip knows to step aside: two bubbles at once would overlap, and neither
+   * would be readable.
+   */
+  function hasOwnTooltip(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest("[data-tip-trigger]") !== null;
+  }
+
   /** Shows a row's config errors at the pointer, if it has any. */
   function showHoverTip(e: MouseEvent, app: AppStateInfo) {
     if (!app.errors?.length) return;
+    if (hasOwnTooltip(e.target)) return;
     hoverTip = { visible: true, x: e.clientX, y: e.clientY, items: app.errors };
     tipPos = { left: e.clientX + 14, top: e.clientY + 14 };
   }
 
-  function moveHoverTip(e: MouseEvent) {
-    if (!hoverTip.visible) return;
+  function moveHoverTip(e: MouseEvent, app: AppStateInfo) {
+    // The pointer reached an element with its own tooltip: this one steps aside.
+    if (hasOwnTooltip(e.target)) {
+      hideHoverTip();
+      return;
+    }
+    // The pointer came back from one, so the row's tip returns with it.
+    if (!hoverTip.visible) {
+      showHoverTip(e, app);
+      return;
+    }
     hoverTip = { ...hoverTip, x: e.clientX, y: e.clientY };
   }
 
@@ -965,9 +987,11 @@
           {#each configIssues as issue (issue.name)}
             <li class="cfg-issue">
               <span class="cfg-issue-name">{issue.name}</span>
-              <span class="cfg-issue-msg" title={configErrorTooltip(issue.messages)}>
-                {issue.messages[0]}{issue.messages.length > 1 ? ` (+${issue.messages.length - 1})` : ""}
-              </span>
+              <Tooltip text={configErrorTooltip(issue.messages)}>
+                <span class="cfg-issue-msg">
+                  {issue.messages[0]}{issue.messages.length > 1 ? ` (+${issue.messages.length - 1})` : ""}
+                </span>
+              </Tooltip>
               <button class="ghost sm" type="button" onclick={() => openEditor(issue.name)}>
                 Edit
               </button>
@@ -1012,36 +1036,41 @@
                 class:disabled={!app.enabled}
                 class:dragging={drag.active && drag.from === i && drag.moved}
                 onmouseenter={(e) => showHoverTip(e, app)}
-                onmousemove={moveHoverTip}
+                onmousemove={(e) => moveHoverTip(e, app)}
                 onmouseleave={hideHoverTip}
               >
                 <td class="c-grip">
-                  <button
-                    class="grip"
-                    type="button"
-                    data-grip={app.name}
-                    aria-label="Reorder {app.name}. Use arrow keys to move it."
-                    title="Drag to reorder"
-                    onpointerdown={(e) => onGripPointerDown(e, i)}
-                    onkeydown={(e) => onGripKeydown(e, i, app.name)}
-                    ondblclick={(e) => e.stopPropagation()}
-                  >
-                    <svg viewBox="0 0 8 12" width="8" height="12" aria-hidden="true">
-                      <circle cx="1.5" cy="2" r="1" />
-                      <circle cx="6.5" cy="2" r="1" />
-                      <circle cx="1.5" cy="6" r="1" />
-                      <circle cx="6.5" cy="6" r="1" />
-                      <circle cx="1.5" cy="10" r="1" />
-                      <circle cx="6.5" cy="10" r="1" />
-                    </svg>
-                  </button>
+                  <Tooltip text="Drag to reorder">
+                    <button
+                      class="grip"
+                      type="button"
+                      data-grip={app.name}
+                      aria-label="Reorder {app.name}. Use arrow keys to move it."
+                      onpointerdown={(e) => onGripPointerDown(e, i)}
+                      onkeydown={(e) => onGripKeydown(e, i, app.name)}
+                      ondblclick={(e) => e.stopPropagation()}
+                    >
+                      <svg viewBox="0 0 8 12" width="8" height="12" aria-hidden="true">
+                        <circle cx="1.5" cy="2" r="1" />
+                        <circle cx="6.5" cy="2" r="1" />
+                        <circle cx="1.5" cy="6" r="1" />
+                        <circle cx="6.5" cy="6" r="1" />
+                        <circle cx="1.5" cy="10" r="1" />
+                        <circle cx="6.5" cy="10" r="1" />
+                      </svg>
+                    </button>
+                  </Tooltip>
                 </td>
                 <td class="c-app">
                   <div class="app-cell">
                     <span class="charge charge-{view.tone}" aria-hidden="true"></span>
                     <span class="app-text">
                       <span class="app-name">{app.name}</span>
-                      <span class="app-cmd selectable" title={formatCommandLine(app)}>{formatCommandLine(app)}</span>
+                      <!-- The command line is cut to the column; the tooltip
+                           carries all of it. -->
+                      <Tooltip text={formatCommandLine(app)}>
+                        <span class="app-cmd selectable">{formatCommandLine(app)}</span>
+                      </Tooltip>
                     </span>
                   </div>
                 </td>
@@ -1186,14 +1215,16 @@
     <header class="panel-head">
       <h2 id="editor-title">{isCreateMode ? "Add app" : editingOriginalName}</h2>
       {#if editingErrors.length > 0}
-        <span class="err-chip" title={configErrorTooltip(editingErrors)} role="status">
-          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
-            <circle cx="6" cy="6" r="5.2" fill="none" stroke="currentColor" stroke-width="1.4" />
-            <path d="M6 3.4v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            <circle cx="6" cy="8.7" r="0.7" fill="currentColor" />
-          </svg>
-          {editingErrors.length} error{editingErrors.length === 1 ? "" : "s"}
-        </span>
+        <Tooltip text={configErrorTooltip(editingErrors)}>
+          <span class="err-chip" role="status">
+            <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+              <circle cx="6" cy="6" r="5.2" fill="none" stroke="currentColor" stroke-width="1.4" />
+              <path d="M6 3.4v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              <circle cx="6" cy="8.7" r="0.7" fill="currentColor" />
+            </svg>
+            {editingErrors.length} error{editingErrors.length === 1 ? "" : "s"}
+          </span>
+        </Tooltip>
       {/if}
       <span class="grow"></span>
       <button class="panel-x" type="button" aria-label="Close" onclick={closeEditor}>

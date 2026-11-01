@@ -155,6 +155,10 @@ gutter use 24px; the empty state breathes at 48px.
   header and footer are pinned; only the form body scrolls. Focus is trapped
   and moved to the name field on open.
 - **Row menu** — a white popover with a 1px ink border and 18px radius.
+- **Tooltip** — a white bubble with a 1px ink border and 8px radius, anchored to
+  the element it wraps and flipped to fit the window. The trigger wrapper has no
+  box of its own, so wrapping a control in a tooltip never shifts it. Long text
+  breaks inside the bubble rather than off the window.
 - **Drop veil** — a full-window overlay shown while a file is dragged over the
   window.
 
@@ -172,6 +176,8 @@ These ship as part of the design rather than at platform defaults:
 - text selection: lime background, ink text;
 - scrollbars: warm, themed from `--ash`/`--stone`;
 - focus ring: 2px ink at a 2px offset (ink, because lime already means "alive");
+- tooltips: drawn by the app — the native `title` bubble is slow, never appears
+  on keyboard focus, and speaks in the platform's language, not the world's;
 - numeric data (`PID`, restarts): tabular figures via `.tnum`;
 - checkboxes: `accent-color: var(--ink)`; number steppers kept as a real
   affordance and ink-tinted.

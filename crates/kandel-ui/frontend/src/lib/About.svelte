@@ -17,6 +17,9 @@
   let copied = $state(false);
   let copyFailed = $state(false);
 
+  // What the copy control has to say right now: the action, or the outcome.
+  let copyLabel = $derived(copied ? "Copied" : copyFailed ? "Could not copy" : "Copy path");
+
   // The release-notes modal, opened from the update button. It takes only the
   // version; the notes are fetched and cached by the store.
   let notesOpen = $state(false);
@@ -161,14 +164,16 @@
       <!-- Source link, then the update control. The source link stays
            achromatic; the update control fills with lime only when a release is
            on offer, because lime marks the one action worth taking. -->
-      <button class="ghost-btn" type="button" title="View source on GitHub" aria-label="View source on GitHub" onclick={openRepo}>
-        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-          <path
-            fill="currentColor"
-            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"
-          />
-        </svg>
-      </button>
+      <Tooltip text="View source on GitHub">
+        <button class="ghost-btn" type="button" aria-label="View source on GitHub" onclick={openRepo}>
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+            />
+          </svg>
+        </button>
+      </Tooltip>
 
       <!-- One control carries the whole update story. It is the refresh action
            until a release is found, then it becomes the install action: same
@@ -227,26 +232,31 @@
         <div class="row">
           <dt>Config</dt>
           <dd class="path">
-            <span class="path-text selectable" title={info.configPath}>{info.configPath}</span>
-            <button
-              class="copy"
-              class:ok={copied}
-              type="button"
-              title={copied ? "Copied" : copyFailed ? "Could not copy" : "Copy path"}
-              aria-label={copied ? "Copied" : copyFailed ? "Could not copy" : "Copy config path"}
-              onclick={copyConfigPath}
-            >
-              {#if copied}
-                <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
-                  <path d="M2 6.5l2.6 2.6L10 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-                </svg>
-              {:else}
-                <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
-                  <rect x="0.6" y="0.6" width="7" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.1" />
-                  <path d="M3.4 9.4v1.2a1.4 1.4 0 0 0 1.4 1.4h4.2a1.4 1.4 0 0 0 1.4-1.4V6.4A1.4 1.4 0 0 0 9 5h-1.2" fill="none" stroke="currentColor" stroke-width="1.1" />
-                </svg>
-              {/if}
-            </button>
+            <!-- The path is cut to fit the row; the tooltip carries the whole
+                 of it, which is what the user needs to paste somewhere else. -->
+            <Tooltip text={info.configPath}>
+              <span class="path-text selectable">{info.configPath}</span>
+            </Tooltip>
+            <Tooltip text={copyLabel}>
+              <button
+                class="copy"
+                class:ok={copied}
+                type="button"
+                aria-label={copied ? "Copied" : copyFailed ? "Could not copy" : "Copy config path"}
+                onclick={copyConfigPath}
+              >
+                {#if copied}
+                  <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                    <path d="M2 6.5l2.6 2.6L10 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                {:else}
+                  <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                    <rect x="0.6" y="0.6" width="7" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.1" />
+                    <path d="M3.4 9.4v1.2a1.4 1.4 0 0 0 1.4 1.4h4.2a1.4 1.4 0 0 0 1.4-1.4V6.4A1.4 1.4 0 0 0 9 5h-1.2" fill="none" stroke="currentColor" stroke-width="1.1" />
+                  </svg>
+                {/if}
+              </button>
+            </Tooltip>
           </dd>
         </div>
       </dl>

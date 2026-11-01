@@ -4,6 +4,7 @@
   import type { ThemeSetting } from "./theme";
   import About from "./About.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
+  import Tooltip from "./Tooltip.svelte";
   import { updateState } from "./update.svelte";
 
   // The application mark, generated from the same geometry as the app icon.
@@ -49,25 +50,26 @@
      the wordmark button, and the Add button sit outside it. -->
 <header class="topbar">
   <div class="lead" data-tauri-drag-region>
-    <button
-      class="wordmark"
-      class:has-notice={updateAvailable}
-      type="button"
-      title="About Kandel"
-      aria-haspopup="dialog"
-      aria-expanded={aboutOpen}
-      aria-describedby={updateAvailable ? UPDATE_NOTICE_ID : undefined}
-      onclick={() => (aboutOpen = !aboutOpen)}
-    >
-      <!-- With custom window chrome there is no OS title-bar icon, so the mark
-           here is the only place the window shows its identity. -->
-      <img class="mark" src={markUrl} alt="" width="18" height="18" />
-      <span>Kandel</span>
-      {#if updateAvailable}
-        <span class="mark-dot" aria-hidden="true"></span>
-        <span id={UPDATE_NOTICE_ID} class="visually-hidden">Update available</span>
-      {/if}
-    </button>
+    <Tooltip text="About Kandel">
+      <button
+        class="wordmark"
+        class:has-notice={updateAvailable}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={aboutOpen}
+        aria-describedby={updateAvailable ? UPDATE_NOTICE_ID : undefined}
+        onclick={() => (aboutOpen = !aboutOpen)}
+      >
+        <!-- With custom window chrome there is no OS title-bar icon, so the mark
+             here is the only place the window shows its identity. -->
+        <img class="mark" src={markUrl} alt="" width="18" height="18" />
+        <span>Kandel</span>
+        {#if updateAvailable}
+          <span class="mark-dot" aria-hidden="true"></span>
+          <span id={UPDATE_NOTICE_ID} class="visually-hidden">Update available</span>
+        {/if}
+      </button>
+    </Tooltip>
     <span class="rule" aria-hidden="true"></span>
     <span class="tally">{summary}</span>
   </div>
@@ -83,34 +85,39 @@
     <SettingsMenu setting={themeSetting} {prefersDark} onSelect={onSelectTheme} />
 
     <div class="wc">
-      <button class="ctl" type="button" title="Minimize" aria-label="Minimize" onclick={() => minimizeWindow()}>
-        <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
-          <path d="M0 5h10" stroke="currentColor" stroke-width="1.1" />
-        </svg>
-      </button>
-      <button
-        class="ctl"
-        type="button"
-        title={maximized ? "Restore" : "Maximize"}
-        aria-label={maximized ? "Restore" : "Maximize"}
-        onclick={() => toggleMaximizeWindow()}
-      >
-        {#if maximized}
+      <Tooltip text="Minimize">
+        <button class="ctl" type="button" aria-label="Minimize" onclick={() => minimizeWindow()}>
           <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
-            <path d="M2.5 2.5V0.5h7v7h-2" fill="none" stroke="currentColor" stroke-width="1.1" />
-            <rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.1" />
+            <path d="M0 5h10" stroke="currentColor" stroke-width="1.1" />
           </svg>
-        {:else}
+        </button>
+      </Tooltip>
+      <Tooltip text={maximized ? "Restore" : "Maximize"}>
+        <button
+          class="ctl"
+          type="button"
+          aria-label={maximized ? "Restore" : "Maximize"}
+          onclick={() => toggleMaximizeWindow()}
+        >
+          {#if maximized}
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
+              <path d="M2.5 2.5V0.5h7v7h-2" fill="none" stroke="currentColor" stroke-width="1.1" />
+              <rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          {:else}
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
+              <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          {/if}
+        </button>
+      </Tooltip>
+      <Tooltip text="Close">
+        <button class="ctl ctl-close" type="button" aria-label="Close" onclick={() => closeWindow()}>
           <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
-            <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.1" />
+            <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1.1" />
           </svg>
-        {/if}
-      </button>
-      <button class="ctl ctl-close" type="button" title="Close" aria-label="Close" onclick={() => closeWindow()}>
-        <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
-          <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1.1" />
-        </svg>
-      </button>
+        </button>
+      </Tooltip>
     </div>
   </div>
 </header>

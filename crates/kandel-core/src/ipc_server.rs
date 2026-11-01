@@ -129,6 +129,9 @@ impl UiLauncher {
             };
             command.arg("-log-format").arg(format);
 
+            // The UI resolves command paths too, so it inherits the current
+            // environment rather than our snapshot.
+            crate::win::environment::refresh_process_environment();
             let child = command
                 .spawn()
                 .with_context(|| format!("launching UI process {}", ui_exe.display()))?;

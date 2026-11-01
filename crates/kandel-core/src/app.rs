@@ -38,6 +38,10 @@ pub fn run(flags: RuntimeFlags, version: &str) -> Result<()> {
 
     // Initial load is lenient: a single bad entry never blocks startup, and even
     // a whole-file problem keeps the core running so the tray and watcher stay up.
+    //
+    // Refresh first: a command that only resolves against a `PATH` entry added
+    // after launch would otherwise read as invalid until a restart.
+    crate::win::environment::refresh_process_environment();
     let loaded = match load_config_lenient(&config_path) {
         Ok(loaded) => loaded,
         Err(e) => {
@@ -231,6 +235,8 @@ fn spawn_watcher(config_path: PathBuf, supervisor: Arc<Supervisor>) {
 
 /// Reloads the config, keeping current state on failure.
 fn reload_and_reconcile(config_path: &Path, supervisor: &Supervisor) {
+    // A config edit often follows an install, so refresh before validating.
+    crate::win::environment::refresh_process_environment();
     match watcher::load_with_retry(config_path) {
         Ok(loaded) => {
             log_invalid_entries(config_path, &loaded);

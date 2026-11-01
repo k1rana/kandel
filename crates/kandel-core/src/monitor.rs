@@ -185,6 +185,9 @@ fn monitor_loop(shared: Arc<MonitorInner>) {
         shared.emit(AppState::Starting, 0, restart_count);
         let start_time = Instant::now();
 
+        // Resolve against the current environment so a command or `env` value on
+        // a `PATH` entry added since launch works, and the child inherits it.
+        crate::win::environment::refresh_process_environment();
         let spec = match LaunchSpec::from_app(&cfg) {
             Ok(spec) => spec,
             Err(e) => {

@@ -134,6 +134,7 @@ The visual system is documented in [`DESIGN.md`](./DESIGN.md).
 ## Behavior notes
 
 - **Config changes are atomic or ignored.** The core watches the file through a debounced watcher. A partially written file fails to parse, so the previous state stays in effect until a valid version lands.
+- **Environment changes are picked up live.** The core is a long-running process, so the environment it starts with would otherwise stay frozen. Before each config load and each launch it re-reads the current user's environment, so a `PATH` directory (or any other variable) added after Kandel started — by installing a tool, for example — resolves without restarting the tray.
 - **Job Object cleanup is absolute.** Each child is bound to a job with kill-on-close, so quitting the core, or losing it, takes down every managed process and its descendants.
 - **The UI holds no process state.** Every change the UI makes goes through `config.toml`; the core is the only writer of process lifecycle.
 

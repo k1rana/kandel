@@ -19,6 +19,8 @@ pub enum AppState {
     Retrying,
     /// Retries exhausted; no further attempts will be made.
     Failed,
+    /// A one-shot entry (`max_retries = 0`) exited cleanly and is done.
+    Finished,
     /// Entry was removed from the configuration.
     Removed,
 }
@@ -33,6 +35,7 @@ impl AppState {
             AppState::Restarting => "Restarting",
             AppState::Retrying => "Retrying",
             AppState::Failed => "Failed",
+            AppState::Finished => "Finished",
             AppState::Removed => "Removed",
         }
     }
@@ -75,6 +78,8 @@ mod tests {
         // The UI matches on this exact string, so keep the spelling stable.
         let json = serde_json::to_string(&AppState::Restarting).unwrap();
         assert_eq!(json, "\"Restarting\"");
+        let json = serde_json::to_string(&AppState::Finished).unwrap();
+        assert_eq!(json, "\"Finished\"");
     }
 
     #[test]

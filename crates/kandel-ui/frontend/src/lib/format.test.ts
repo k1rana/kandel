@@ -377,6 +377,7 @@ describe("stateView", () => {
     expect(stateView("Restarting")).toMatchObject({ label: "Restarting", tone: "waiting" });
     expect(stateView("Retrying")).toMatchObject({ label: "Retrying", tone: "waiting" });
     expect(stateView("Failed")).toMatchObject({ label: "Failed", tone: "down" });
+    expect(stateView("Finished")).toMatchObject({ label: "Finished", tone: "idle", healthy: false });
     expect(stateView("Stopped")).toMatchObject({ label: "Stopped", tone: "idle" });
   });
 

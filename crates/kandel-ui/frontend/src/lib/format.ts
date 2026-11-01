@@ -297,6 +297,8 @@ export function stateView(state: string): StateView {
       return { label: "Retrying", tone: "waiting", healthy: false };
     case "failed":
       return { label: "Failed", tone: "down", healthy: false };
+    case "finished":
+      return { label: "Finished", tone: "idle", healthy: false };
     case "configerror":
       return { label: "Config error", tone: "down", healthy: false };
     case "unknown":

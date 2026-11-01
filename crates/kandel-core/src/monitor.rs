@@ -264,7 +264,14 @@ fn monitor_loop(shared: Arc<MonitorInner>) {
         // ordered ahead of the next start marker.
         child.join_capture();
 
-        // Process exited on its own.
+        // Process exited on its own. A one-shot entry (`max_retries = 0`) is
+        // done after one run: a clean exit lands on Finished rather than the
+        // failure path below, while a non-zero exit still fails.
+        if cfg.max_retries == 0 && child.exit_code().is_ok_and(|code| code == Some(0)) {
+            shared.emit(AppState::Finished, 0, 0);
+            return;
+        }
+
         let duration = start_time.elapsed();
 
         if cfg.healthy_timeout_sec > 0
@@ -576,6 +583,55 @@ mod tests {
         }
         assert!(saw_failed, "expected the app to be marked Failed");
         // A terminal monitor has nothing to stop; stop() is a no-op.
+        monitor.stop();
+    }
+
+    #[test]
+    fn monitor_marks_one_shot_finished_on_clean_exit() {
+        use std::sync::mpsc::channel;
+
+        let (tx, rx) = channel();
+        let on_state: StateCallback = Arc::new(move |status| {
+            let _ = tx.send(status);
+        });
+
+        // `max_retries = 0` is a run-once entry: it runs a single time, and a
+        // clean exit is a completion, not a failure.
+        let cfg = App {
+            name: "oneshot".into(),
+            command: "cmd.exe".into(),
+            args: vec!["/c".into(), "exit 0".into()],
+            hide_window: true,
+            restart_delay_sec: 0,
+            max_retries: 0,
+            ..App::default()
+        };
+
+        let monitor = Monitor::new(
+            "oneshot".into(),
+            cfg,
+            on_state,
+            Arc::new(Notifier::new()),
+            Arc::new(LogStore::default()),
+        );
+        monitor.start();
+
+        let mut saw_finished = false;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(3)) {
+                Ok(status) if status.state == AppState::Finished => {
+                    saw_finished = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_finished,
+            "expected the one-shot app to be marked Finished"
+        );
         monitor.stop();
     }
 

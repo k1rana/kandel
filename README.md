@@ -96,7 +96,7 @@ Each top-level TOML table (`[name]`) defines one monitored app. `name` is the id
 | `hide_window`         | Boolean      | `false`                         | If `true`, launches the process with a hidden window.                             |
 | `capture_output`      | Boolean      | `true`                          | If `true`, the process's stdout/stderr are captured into its UI log. The child is given a hidden console so console tools work. Set `false` to leave all standard handles untouched. See [Viewing logs](#viewing-logs). |
 | `restart_delay_sec`   | Integer      | `0`                             | Wait time (seconds) before attempting a restart after detecting termination.      |
-| `max_retries`         | Integer      | `-1` (infinite)                 | Retry limit for a crashing app. `0` disables retry; negative means infinite.      |
+| `max_retries`         | Integer      | `-1` (infinite)                 | Retry limit for a crashing app. `0` disables retry, so the entry runs once and a clean exit is reported as Finished; negative means infinite. |
 | `healthy_timeout_sec` | Integer      | `0`                             | If the process runs this long before exiting, the restart counter resets. `0` disables the reset. |
 | `stop_command`        | String       | `""`                            | Optional shutdown executable. Resolved via `PATH` if relative.                    |
 | `stop_args`           | String array | `[]`                            | Arguments for `stop_command`. Supports `${PID}` / `${NAME}`.                      |
